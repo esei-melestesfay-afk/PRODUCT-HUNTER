@@ -8,6 +8,9 @@ const topList = document.getElementById("topList");
 const analysisPreview = document.getElementById("analysisPreview");
 const claudeBadge = document.getElementById("claudeBadge");
 
+const BACKUP_KEY = "productHunterV4_adBackup";
+const MAX_BACKUP_ADS = 250;
+
 function esc(v){
   return String(v ?? "")
     .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
@@ -25,6 +28,51 @@ function companyRow(name){
   `;
 }
 
+function evidenceLabel(x){
+  const days = Number(x.ad_age_days || 0);
+  const s = String(x.ad_status || "unknown");
+  if(s === "active") return days ? `Aktiv · ${days} dagar` : "Aktiv";
+  if(s === "inactive") return days ? `Inaktiv · kördes ${days} dagar` : "Inaktiv";
+  return days ? `${days} dagar observerat` : "Datum saknas";
+}
+
+function getBackup(){
+  try{
+    const data = JSON.parse(localStorage.getItem(BACKUP_KEY) || "[]");
+    return Array.isArray(data) ? data : [];
+  }catch(_){
+    return [];
+  }
+}
+
+function saveBackup(items){
+  if(!Array.isArray(items) || !items.length) return;
+  const old = getBackup();
+  const map = new Map();
+  for(const x of old){
+    if(x?.raw_text) map.set(x.key || x.raw_text.slice(0,250), x);
+  }
+  for(const x of items){
+    if(!x?.raw_text) continue;
+    const raw = String(x.raw_text).slice(0,12000);
+    const key = x.meta_library_id ? `meta:${x.meta_library_id}` : (x.fingerprint || raw.slice(0,250));
+    map.set(key, {
+      key,
+      raw_text: raw,
+      country: x.country || "SE",
+      company: x.company || "",
+      saved_at: new Date().toISOString()
+    });
+  }
+  const compact = Array.from(map.values()).slice(-MAX_BACKUP_ADS);
+  try{
+    localStorage.setItem(BACKUP_KEY, JSON.stringify(compact));
+  }catch(_){
+    // If storage is full, keep only the latest 80 ads.
+    try{ localStorage.setItem(BACKUP_KEY, JSON.stringify(compact.slice(-80))); }catch(__){}
+  }
+}
+
 async function loadSystemStatus(){
   try{
     const r = await fetch("/api/status");
@@ -39,7 +87,10 @@ async function loadSystemStatus(){
     if(!d.claude_ready){
       analyzeBtn.title = "Lägg ANTHROPIC_API_KEY i Render Environment Variables.";
     }
-  }catch(_){}
+    return !!d.claude_ready;
+  }catch(_){
+    return false;
+  }
 }
 
 async function loadKeyword(reset=false){
@@ -89,7 +140,7 @@ function decisionClass(d){
 }
 
 function renderTop(items){
-  if(!items.length){
+  if(!items?.length){
     topList.innerHTML = `<div class="empty">Ingen Claude-analyserad produkt rankad ännu.</div>`;
     return;
   }
@@ -115,13 +166,15 @@ function renderTop(items){
         <span>Proof <b>${x.market_validation_score}/10</b></span>
         <span>Betalningsvilja <b>${x.willingness_to_pay}/10</b></span>
         <span>AI confidence <b>${x.ai_confidence}/10</b></span>
+        <span>Annons <b>${esc(evidenceLabel(x))}</b></span>
+        ${x.meta_library_id ? `<span>Meta ID <b>${esc(x.meta_library_id)}</b></span>` : ""}
       </div>
     </article>
   `).join("");
 }
 
 function renderPreview(items){
-  if(!items.length){
+  if(!items?.length){
     analysisPreview.innerHTML = "";
     return;
   }
@@ -130,7 +183,7 @@ function renderPreview(items){
       <div class="preview-head">
         <div>
           <strong>${esc(x.product_name)}</strong>
-          <small>${esc(x.country)} · Claude</small>
+          <small>${esc(x.country)} · Claude · ${esc(evidenceLabel(x))}</small>
         </div>
         <span>${Number(x.final_score||0).toFixed(1)}/100</span>
       </div>
@@ -156,6 +209,18 @@ function renderPreview(items){
   `).join("");
 }
 
+async function runAnalysis(raw, selectedCountry, selectedKeyword){
+  const r = await fetch("/api/analyze",{
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({raw, country:selectedCountry, keyword:selectedKeyword})
+  });
+  const d = await r.json();
+  if(!r.ok) throw new Error(d.error || "Fel");
+  saveBackup(d.analyzed || []);
+  return d;
+}
+
 analyzeBtn.addEventListener("click", async()=>{
   const raw = adsInput.value.trim();
   if(!raw){
@@ -167,18 +232,7 @@ analyzeBtn.addEventListener("click", async()=>{
   statusEl.textContent="Claude analyserar varje annons...";
 
   try{
-    const r = await fetch("/api/analyze",{
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        raw,
-        country:country.value,
-        keyword:keyword.textContent
-      })
-    });
-    const d = await r.json();
-    if(!r.ok) throw new Error(d.error || "Fel");
-
+    const d = await runAnalysis(raw, country.value, keyword.textContent);
     renderPreview(d.analyzed);
     renderTop(d.top5);
     statusEl.textContent = `${d.count} AI-analyserade · ${d.duplicates_skipped} dubletter · ${d.library_count} totalt`;
@@ -190,8 +244,53 @@ analyzeBtn.addEventListener("click", async()=>{
   }
 });
 
+async function maybeOfferRestore(){
+  try{
+    const r = await fetch("/api/top");
+    const d = await r.json();
+    if(Number(d.library_count || 0) > 0) return;
+    const backup = getBackup();
+    if(!backup.length) return;
+
+    const ok = confirm(
+      `Render-databasen verkar tom, men den här webbläsaren har backup av ${backup.length} annonser.\n\n` +
+      `Vill du återställa dem? Claude behöver analysera dem igen, så det använder API-kredit.`
+    );
+    if(!ok) return;
+
+    analyzeBtn.disabled = true;
+    const groups = {};
+    for(const x of backup){
+      const c = x.country || "SE";
+      (groups[c] ||= []).push(x.raw_text);
+    }
+
+    let last = null;
+    let restored = 0;
+    for(const [c, raws] of Object.entries(groups)){
+      for(let i=0; i<raws.length; i+=100){
+        const batch = raws.slice(i,i+100).join("\n\n---\n\n");
+        statusEl.textContent = `Återställer backup... ${restored}/${backup.length}`;
+        last = await runAnalysis(batch, c, "browser-backup");
+        restored += Math.min(100, raws.length-i);
+      }
+    }
+    if(last){
+      renderTop(last.top5 || []);
+      renderPreview(last.analyzed || []);
+    }
+    statusEl.textContent = `Backup återställd · ${restored} annonser`;
+  }catch(e){
+    statusEl.textContent = `Backup kunde inte återställas: ${e.message}`;
+  }finally{
+    analyzeBtn.disabled = false;
+    await loadSystemStatus();
+  }
+}
+
 document.getElementById("resetBtn").addEventListener("click", async()=>{
-  if(!confirm("Ta bort hela kandidatbiblioteket och Top 5?")) return;
+  if(!confirm("Ta bort hela kandidatbiblioteket, Top 5 och webbläsarens backup?")) return;
+  localStorage.removeItem(BACKUP_KEY);
   const r = await fetch("/api/reset",{method:"POST"});
   const d = await r.json();
   renderTop(d.top5||[]);
@@ -199,5 +298,9 @@ document.getElementById("resetBtn").addEventListener("click", async()=>{
   statusEl.textContent="Nollställt";
 });
 
-loadKeyword(true);
-loadSystemStatus();
+async function boot(){
+  await loadKeyword(true);
+  await loadSystemStatus();
+  await maybeOfferRestore();
+}
+boot();
