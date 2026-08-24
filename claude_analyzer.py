@@ -181,10 +181,12 @@ def _analyze_batch(batch):
     response = client.messages.create(
         model=model_name(),
         max_tokens=16000,
-        effort="high",
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_content(batch)}],
-        output_config={"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}},
+        output_config={
+            "effort": "high",
+            "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}
+        },
     )
     text_blocks = [b.text for b in response.content if getattr(b, "type", "") == "text"]
     payload = json.loads("".join(text_blocks))
