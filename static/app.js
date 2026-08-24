@@ -14,6 +14,17 @@ function esc(v){
     .replaceAll('"',"&quot;");
 }
 
+function companyRow(name){
+  const value = String(name || "Okänt företag").trim() || "Okänt företag";
+  return `
+    <div class="company-row">
+      <span class="company-label">Företag</span>
+      <strong class="company-name">${esc(value)}</strong>
+      <button type="button" class="copy-company small" data-company="${esc(value)}">Kopiera</button>
+    </div>
+  `;
+}
+
 async function loadSystemStatus(){
   try{
     const r = await fetch("/api/status");
@@ -50,6 +61,21 @@ document.getElementById("copyKeyword").addEventListener("click", async()=>{
   setTimeout(()=>statusEl.textContent="Redo",1000);
 });
 
+document.addEventListener("click", async(e)=>{
+  const btn = e.target.closest(".copy-company");
+  if(!btn) return;
+  const value = btn.dataset.company || "";
+  if(!value) return;
+  try{
+    await navigator.clipboard.writeText(value);
+    const old = btn.textContent;
+    btn.textContent = "Kopierat";
+    setTimeout(()=>btn.textContent=old, 1000);
+  }catch(_){
+    statusEl.textContent = "Kunde inte kopiera";
+  }
+});
+
 document.getElementById("clearInput").addEventListener("click",()=>{
   adsInput.value="";
   analysisPreview.innerHTML="";
@@ -79,7 +105,7 @@ function renderTop(items){
         <strong>${esc(x.product_name)}</strong>
         <span>${Number(x.final_score||0).toFixed(1)}</span>
       </div>
-      <div class="company">${esc(x.company)}</div>
+      ${companyRow(x.company)}
       <p>${esc(x.problem_summary)}</p>
       <div class="why">${esc(x.why_short)}</div>
       <div class="score-grid">
@@ -104,10 +130,11 @@ function renderPreview(items){
       <div class="preview-head">
         <div>
           <strong>${esc(x.product_name)}</strong>
-          <small>${esc(x.company)} · ${esc(x.country)} · Claude</small>
+          <small>${esc(x.country)} · Claude</small>
         </div>
         <span>${Number(x.final_score||0).toFixed(1)}/100</span>
       </div>
+      ${companyRow(x.company)}
       <p>${esc(x.problem_summary)}</p>
       ${x.purchase_reason ? `<div class="purchase-reason">${esc(x.purchase_reason)}</div>` : ""}
       <div class="metrics">
