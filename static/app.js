@@ -1,6 +1,7 @@
 let keywordIndex = 0;
 const country = document.getElementById("country");
 const keyword = document.getElementById("keyword");
+const keywordTranslation = document.getElementById("keywordTranslation");
 const statusEl = document.getElementById("status");
 const adsInput = document.getElementById("adsInput");
 const analyzeBtn = document.getElementById("analyzeBtn");
@@ -10,6 +11,51 @@ const claudeBadge = document.getElementById("claudeBadge");
 
 const BACKUP_KEY = "productHunterV4_adBackup";
 const MAX_BACKUP_ADS = 250;
+
+const SWEDISH_KEYWORD_MEANINGS = {
+  NO: {
+    "lei av":"trött på","slipp":"slipp","vanskelig å":"svårt att","våkner med":"vaknar med",
+    "vondt i":"ont i","hver dag":"varje dag","endelig":"äntligen","uten å måtte":"utan att behöva",
+    "slipp å bøye deg":"slipp böja dig","spar tid":"spara tid","mindre rot":"mindre stök",
+    "gjør hverdagen enklere":"gör vardagen enklare","for deg som":"för dig som","aldri mer":"aldrig mer",
+    "mer komfort hjemme":"bekvämare hemma","problem med":"problem med"
+  },
+  DK: {
+    "træt af":"trött på","slip for":"slipp","svært ved":"svårt att","vågner med":"vaknar med",
+    "ondt i":"ont i","hver dag":"varje dag","endelig":"äntligen","uden at skulle":"utan att behöva",
+    "slip for at bøje dig":"slipp böja dig","spar tid":"spara tid","mindre rod":"mindre stök",
+    "gør hverdagen lettere":"gör vardagen enklare","til dig der":"för dig som","aldrig mere":"aldrig mer",
+    "problem med":"problem med"
+  },
+  FI: {
+    "helpompi arki":"enklare vardag","vaikea":"svårt","joka päivä":"varje dag","vihdoin":"äntligen",
+    "säästä aikaa":"spara tid","parempi uni":"bättre sömn","helpompi kotona":"enklare hemma",
+    "arkiongelma":"vardagsproblem","ilman että":"utan att","mukavampi":"bekvämare",
+    "vähemmän vaivaa":"mindre besvär"
+  },
+  DE: {
+    "müde von":"trött på","schwer zu":"svårt att","jeden tag":"varje dag","endlich":"äntligen",
+    "ohne zu müssen":"utan att behöva","zeit sparen":"spara tid","besser schlafen":"sova bättre",
+    "ordnung halten":"hålla ordning","alltag leichter":"enklare vardag","weniger aufwand":"mindre besvär",
+    "problem mit":"problem med"
+  },
+  NL: {
+    "moe van":"trött på","moeilijk om":"svårt att","elke dag":"varje dag","eindelijk":"äntligen",
+    "zonder gedoe":"utan krångel","tijd besparen":"spara tid","beter slapen":"sova bättre",
+    "opgeruimd huis":"ordnat hem","dagelijks leven makkelijker":"gör vardagen enklare",
+    "probleem met":"problem med"
+  },
+  AT: {
+    "müde von":"trött på","schwer zu":"svårt att","jeden tag":"varje dag","endlich":"äntligen",
+    "ohne aufwand":"utan besvär","zeit sparen":"spara tid","besser schlafen":"sova bättre",
+    "alltag leichter":"enklare vardag","problem mit":"problem med"
+  },
+  CH: {
+    "müde von":"trött på","schwer zu":"svårt att","jeden tag":"varje dag","endlich":"äntligen",
+    "ohne aufwand":"utan besvär","zeit sparen":"spara tid","mehr komfort":"mer komfort",
+    "alltag leichter":"enklare vardag","problem mit":"problem med"
+  }
+};
 
 function esc(v){
   return String(v ?? "")
@@ -68,7 +114,6 @@ function saveBackup(items){
   try{
     localStorage.setItem(BACKUP_KEY, JSON.stringify(compact));
   }catch(_){
-    // If storage is full, keep only the latest 80 ads.
     try{ localStorage.setItem(BACKUP_KEY, JSON.stringify(compact.slice(-80))); }catch(__){}
   }
 }
@@ -98,6 +143,15 @@ async function loadKeyword(reset=false){
   const r = await fetch(`/api/keyword?country=${encodeURIComponent(country.value)}&index=${keywordIndex}`);
   const d = await r.json();
   keyword.textContent = d.keyword;
+
+  const meaning = SWEDISH_KEYWORD_MEANINGS[country.value]?.[d.keyword];
+  if(country.value !== "SE" && meaning){
+    keywordTranslation.textContent = `Svenska: ${meaning}`;
+    keywordTranslation.style.display = "block";
+  }else{
+    keywordTranslation.textContent = "";
+    keywordTranslation.style.display = "none";
+  }
 }
 
 document.getElementById("nextKeyword").addEventListener("click", async()=>{
