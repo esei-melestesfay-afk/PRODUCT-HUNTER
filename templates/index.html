@@ -3,16 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Evergreen Product Hunter V3</title>
+  <title>Evergreen Product Hunter V4</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 <header class="topbar">
   <div>
-    <div class="eyebrow">PRODUCT HUNTER V3</div>
+    <div class="eyebrow">PRODUCT HUNTER V4</div>
     <h1>Evergreen Product Hunter</h1>
   </div>
-  <div class="pill">Deep Analysis</div>
+  <div class="header-status">
+    <div id="claudeBadge" class="ai-badge {{ 'online' if claude_ready else 'offline' }}">
+      <span class="ai-dot"></span>
+      <span>{{ 'Claude AI ansluten' if claude_ready else 'Claude API saknas' }}</span>
+    </div>
+    <div class="pill">AI + Evidence</div>
+  </div>
 </header>
 
 <main class="layout">
@@ -41,16 +47,15 @@
       <div class="filter-row"><span>Stark signal</span><b>180+ dagar</b></div>
     </div>
 
-    <div class="mini-note">
-      Land används för research men påverkar <b>inte</b> produktens score.
-    </div>
+    <div class="mini-note">Land visas i rankingen men påverkar <b>inte</b> poängen.</div>
+    <div class="mini-note ai-note">Claude läser betydelsen i annonsen. Kodmotorn väger sedan in datum, dubletter och marknadsbevis.</div>
   </aside>
 
   <section class="panel center">
     <div class="section-title">
       <div>
         <h2>2. Klistra in annonser</h2>
-        <p>Upp till 100. Separera helst med <code>---</code></p>
+        <p>Upp till 100. Varje annons djupanalyseras. Separera helst med <code>---</code></p>
       </div>
       <span id="status" class="status">Redo</span>
     </div>
@@ -69,7 +74,7 @@ Primary text: ...
 Headline: ..."></textarea>
 
     <div class="actions">
-      <button id="analyzeBtn" class="primary">Djupanalysera allt</button>
+      <button id="analyzeBtn" class="primary">Analysera med Claude</button>
       <button id="clearInput" class="secondary">Töm</button>
     </div>
 
@@ -80,7 +85,7 @@ Headline: ..."></textarea>
     <div class="section-title">
       <div>
         <h2>3. Top 5</h2>
-        <p>Unika vinnarkandidater</p>
+        <p>Claude + objektiva signaler</p>
       </div>
       <button id="resetBtn" class="danger small">Nollställ</button>
     </div>
@@ -92,6 +97,7 @@ Headline: ..."></textarea>
             <div class="rank-top">
               <span class="rank-number">#{{ loop.index }}</span>
               <span class="country-badge">{{ item.country }}</span>
+              <span class="ai-mini">AI</span>
               <span class="decision">{{ item.decision }}</span>
             </div>
             <div class="rank-head">
@@ -106,11 +112,13 @@ Headline: ..."></textarea>
               <span>35+ <b>{{ item.fit35_score }}/10</b></span>
               <span>Evergreen <b>{{ item.evergreen_score }}/10</b></span>
               <span>Proof <b>{{ item.market_validation_score }}/10</b></span>
+              <span>Betalningsvilja <b>{{ item.willingness_to_pay }}/10</b></span>
+              <span>AI confidence <b>{{ item.ai_confidence }}/10</b></span>
             </div>
           </article>
         {% endfor %}
       {% else %}
-        <div class="empty">Ingen produkt rankad ännu.</div>
+        <div class="empty">Ingen Claude-analyserad produkt rankad ännu.</div>
       {% endif %}
     </div>
   </aside>
