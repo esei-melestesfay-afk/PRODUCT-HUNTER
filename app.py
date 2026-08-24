@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify
-import sqlite3, json, os
+import sqlite3, json, os, re
 from pathlib import Path
 from datetime import datetime
 
@@ -68,13 +68,80 @@ def init_db():
     conn.close()
 
 
+def _clean_line(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def extract_meta_advertiser(raw_text, fallback="Okänt företag"):
+    """Deterministically extract the Meta advertiser/page name.
+
+    Claude is intentionally NOT allowed to invent this value. We prefer explicit
+    Company/Page labels, then the line directly before Meta's Sponsored marker,
+    then duplicated page-name lines common in Ad Library copy/paste.
+    """
+    raw_text = raw_text or ""
+
+    for label in ("Company", "Företag", "Annonsör", "Page name", "Sidnamn", "Page"):
+        match = re.search(rf"(?im)^\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*$", raw_text)
+        if match:
+            value = _clean_line(match.group(1))[:120]
+            if value:
+                return value
+
+    lines = [_clean_line(x) for x in raw_text.splitlines() if _clean_line(x)]
+    first = lines[:18]
+
+    sponsored = re.compile(
+        r"^(?:sponsrad|sponsras|sponsored|gesponsert|gesponsord|werbung|annonce|mainos)$",
+        re.I,
+    )
+    bad = re.compile(
+        r"(?:https?://|www\.|biblioteks?-id|library\s*id|plattform|platform|"
+        r"^aktiv$|^inaktiv$|^active$|^inactive$|^details?$|^see ad details$)",
+        re.I,
+    )
+
+    def valid(candidate):
+        candidate = _clean_line(candidate)
+        if not candidate or len(candidate) > 90 or bad.search(candidate):
+            return False
+        if re.search(r"\b\d{1,2}\s+[A-Za-zÅÄÖåäö]{3,10}\s+20\d{2}\b", candidate):
+            return False
+        if len(candidate.split()) > 8:
+            return False
+        return True
+
+    # Meta Ad Library commonly pastes: PageName / PageName / Sponsored.
+    for i, line in enumerate(first):
+        if sponsored.match(line) and i > 0:
+            candidate = first[i - 1]
+            if valid(candidate):
+                return candidate
+
+    # Repeated short lines are a very strong page-name signal.
+    for i in range(len(first) - 1):
+        if first[i].casefold() == first[i + 1].casefold() and valid(first[i]):
+            return first[i]
+
+    # Last fallback: first plausible short line from the Meta paste.
+    for line in first[:6]:
+        if valid(line) and not sponsored.match(line):
+            return line
+
+    fallback = _clean_line(fallback)
+    return fallback or "Okänt företag"
+
+
 def row_to_item(row):
     try:
         item = json.loads(row["analysis_json"]) if row["analysis_json"] else {}
     except Exception:
         item = {}
 
-    item.setdefault("company", row["company"])
+    # Always re-read the advertiser from the original Meta text. This also fixes
+    # older saved rows without requiring the user to reset the ranking.
+    detected_company = extract_meta_advertiser(row["raw_text"] or "", row["company"])
+    item["company"] = detected_company
     item.setdefault("product_name", row["product_name"] or "Fysisk produkt")
     item.setdefault("category", row["category"] or "Övrig vardagsprodukt")
     item.setdefault("problem_type", row["problem_type"] or "Allmänt vardagsproblem")
@@ -287,6 +354,8 @@ def api_analyze():
         return jsonify({"error": "Klistra in minst en annons."}), 400
 
     local_items = [analyze_ad_base(b) for b in blocks]
+    for block, item in zip(blocks, local_items):
+        item["company"] = extract_meta_advertiser(block, item.get("company"))
 
     conn = db()
     fresh = []
