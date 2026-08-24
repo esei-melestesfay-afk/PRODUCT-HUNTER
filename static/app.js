@@ -6,11 +6,29 @@ const adsInput = document.getElementById("adsInput");
 const analyzeBtn = document.getElementById("analyzeBtn");
 const topList = document.getElementById("topList");
 const analysisPreview = document.getElementById("analysisPreview");
+const claudeBadge = document.getElementById("claudeBadge");
 
 function esc(v){
   return String(v ?? "")
     .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
     .replaceAll('"',"&quot;");
+}
+
+async function loadSystemStatus(){
+  try{
+    const r = await fetch("/api/status");
+    const d = await r.json();
+    claudeBadge.classList.toggle("online", !!d.claude_ready);
+    claudeBadge.classList.toggle("offline", !d.claude_ready);
+    claudeBadge.innerHTML = `
+      <span class="ai-dot"></span>
+      <span>${d.claude_ready ? `Claude AI · ${esc(d.model)}` : "Claude API saknas"}</span>
+    `;
+    analyzeBtn.disabled = !d.claude_ready;
+    if(!d.claude_ready){
+      analyzeBtn.title = "Lägg ANTHROPIC_API_KEY i Render Environment Variables.";
+    }
+  }catch(_){}
 }
 
 async function loadKeyword(reset=false){
@@ -46,7 +64,7 @@ function decisionClass(d){
 
 function renderTop(items){
   if(!items.length){
-    topList.innerHTML = `<div class="empty">Ingen produkt rankad ännu.</div>`;
+    topList.innerHTML = `<div class="empty">Ingen Claude-analyserad produkt rankad ännu.</div>`;
     return;
   }
   topList.innerHTML = items.map((x,i)=>`
@@ -54,6 +72,7 @@ function renderTop(items){
       <div class="rank-top">
         <span class="rank-number">#${i+1}</span>
         <span class="country-badge">${esc(x.country)}</span>
+        <span class="ai-mini">AI</span>
         <span class="decision ${decisionClass(x.decision)}">${esc(x.decision)}</span>
       </div>
       <div class="rank-head">
@@ -68,6 +87,8 @@ function renderTop(items){
         <span>35+ <b>${x.fit35_score}/10</b></span>
         <span>Evergreen <b>${x.evergreen_score}/10</b></span>
         <span>Proof <b>${x.market_validation_score}/10</b></span>
+        <span>Betalningsvilja <b>${x.willingness_to_pay}/10</b></span>
+        <span>AI confidence <b>${x.ai_confidence}/10</b></span>
       </div>
     </article>
   `).join("");
@@ -78,29 +99,32 @@ function renderPreview(items){
     analysisPreview.innerHTML = "";
     return;
   }
-  analysisPreview.innerHTML = `<h3 class="preview-title">Senaste analysen</h3>` + items.map(x=>`
+  analysisPreview.innerHTML = `<h3 class="preview-title">Senaste Claude-analysen</h3>` + items.map(x=>`
     <article class="preview-card">
       <div class="preview-head">
         <div>
           <strong>${esc(x.product_name)}</strong>
-          <small>${esc(x.company)} · ${esc(x.country)}</small>
+          <small>${esc(x.company)} · ${esc(x.country)} · Claude</small>
         </div>
-        <span>${Number(x.final_score||x.base_score||0).toFixed(1)}/100</span>
+        <span>${Number(x.final_score||0).toFixed(1)}/100</span>
       </div>
       <p>${esc(x.problem_summary)}</p>
+      ${x.purchase_reason ? `<div class="purchase-reason">${esc(x.purchase_reason)}</div>` : ""}
       <div class="metrics">
         <span>Problem ${x.problem_strength}/10</span>
-        <span>Severity ${x.severity_score}/10</span>
         <span>Frequency ${x.frequency_score}/10</span>
         <span>Emotion ${x.emotion_score}/10</span>
         <span>35+ ${x.fit35_score}/10</span>
         <span>Evergreen ${x.evergreen_score}/10</span>
+        <span>WTP ${x.willingness_to_pay}/10</span>
         <span>Clarity ${x.clarity_score}/10</span>
         <span>Demo ${x.demo_score}/10</span>
-        <span>Market ${x.market_validation_score}/10</span>
-        <span>Confidence ${x.confidence_score}/10</span>
+        <span>Proof ${x.market_validation_score}/10</span>
+        <span>AI confidence ${x.ai_confidence}/10</span>
       </div>
-      ${x.warnings?.length ? `<div class="warnings">⚠ ${esc(x.warnings.join(", "))}</div>` : ""}
+      ${x.why_could_win ? `<div class="ai-why"><b>Varför:</b> ${esc(x.why_could_win)}</div>` : ""}
+      ${x.why_could_fail ? `<div class="warnings"><b>Risk:</b> ${esc(x.why_could_fail)}</div>` : ""}
+      ${x.red_flags?.length ? `<div class="warnings">⚠ ${esc(x.red_flags.join(" · "))}</div>` : ""}
     </article>
   `).join("");
 }
@@ -113,7 +137,7 @@ analyzeBtn.addEventListener("click", async()=>{
   }
 
   analyzeBtn.disabled=true;
-  statusEl.textContent="Djupanalyserar...";
+  statusEl.textContent="Claude analyserar varje annons...";
 
   try{
     const r = await fetch("/api/analyze",{
@@ -130,12 +154,12 @@ analyzeBtn.addEventListener("click", async()=>{
 
     renderPreview(d.analyzed);
     renderTop(d.top5);
-    statusEl.textContent =
-      `${d.count} nya · ${d.duplicates_skipped} dubletter · ${d.library_count} totalt`;
+    statusEl.textContent = `${d.count} AI-analyserade · ${d.duplicates_skipped} dubletter · ${d.library_count} totalt`;
   }catch(e){
     statusEl.textContent=e.message;
   }finally{
     analyzeBtn.disabled=false;
+    await loadSystemStatus();
   }
 });
 
@@ -149,3 +173,4 @@ document.getElementById("resetBtn").addEventListener("click", async()=>{
 });
 
 loadKeyword(true);
+loadSystemStatus();
