@@ -37,6 +37,10 @@ button:disabled{opacity:.55;cursor:wait}.primary{background:var(--green);border-
 .decision.best{background:#e7f9ef;color:#0b7b48}.decision.strong{background:#edf5ff;color:#2564ad}.decision.keep{background:#fff6e5;color:#9a6810}.decision.weak{background:#fff0f0;color:#b43e3e}
 .rank-head{display:flex;justify-content:space-between;gap:10px;align-items:center}.rank-head strong{font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rank-head span{font-size:15px;font-weight:950;color:var(--green)}
 .company{font-size:10px;color:#7a8795;margin-top:3px}.rank-card p{font-size:11px;margin-top:6px}.why{font-size:10px;color:#405063;margin-top:7px}
+.company-row{display:flex;align-items:center;gap:7px;margin-top:8px;margin-bottom:7px;padding:7px 8px;background:#f6faf8;border:1px solid #dcebe3;border-radius:9px;min-width:0}
+.company-label{font-size:9px;letter-spacing:.06em;text-transform:uppercase;color:#718077;font-weight:900;flex:0 0 auto}
+.company-name{font-size:12px;color:#173c2b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.company-row .copy-company{padding:4px 7px;font-size:9px;flex:0 0 auto}
 .score-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:10px}.score-grid span{border-radius:8px;display:flex;justify-content:space-between}.score-grid b{color:#273747}
 .empty{background:#fff;border:1px dashed #d6dee7;border-radius:12px;color:#7a8795;text-align:center;padding:22px;margin-top:20px;font-size:12px}
 .header-status{display:flex;align-items:center;gap:8px}
