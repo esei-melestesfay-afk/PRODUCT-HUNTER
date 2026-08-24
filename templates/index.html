@@ -104,7 +104,11 @@ Headline: ..."></textarea>
               <strong>{{ item.product_name }}</strong>
               <span>{{ "%.1f"|format(item.final_score) }}</span>
             </div>
-            <div class="company">{{ item.company }}</div>
+            <div class="company-row">
+              <span class="company-label">Företag</span>
+              <strong class="company-name">{{ item.company }}</strong>
+              <button type="button" class="copy-company small" data-company="{{ item.company|e }}">Kopiera</button>
+            </div>
             <p>{{ item.problem_summary }}</p>
             <div class="why">{{ item.why_short }}</div>
             <div class="score-grid">
