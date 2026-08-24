@@ -61,7 +61,7 @@
     <textarea id="adsInput" placeholder="Klistra in annonser här..."></textarea>
 
     <div class="actions">
-      <button id="analyzeBtn" class="primary">Analysera</button>
+      <button id="analyzeBtn" class="primary" onclick="this.dataset.running='1';this.disabled=true;document.getElementById('status').textContent='Startar analys…';">Analysera</button>
       <button id="clearInput" class="secondary">Töm</button>
     </div>
 
