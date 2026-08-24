@@ -54,37 +54,15 @@
 
   <section class="panel center">
     <div class="section-title">
-      <div>
-        <h2>2. Klistra in annonser</h2>
-        <p>Upp till <b>1000</b>. Systemet delar automatiskt upp dem i säkra Claude-batcher. <code>---</code> mellan annonser är bäst, men Meta-klipp med Sponsras/Sponsored känns också igen.</p>
-      </div>
+      <h2>2. Annonser</h2>
       <span id="status" class="status">Redo</span>
     </div>
 
-    <textarea id="adsInput" placeholder="Company: Företagsnamn
-Product: Produktnamn (om du vet)
-Started running on 2025-11-10
-Primary text: ...
-Headline: ...
-
----
-
-Company: Nästa företag
-Started running on ...
-Primary text: ...
-Headline: ..."></textarea>
+    <textarea id="adsInput" placeholder="Klistra in annonser här..."></textarea>
 
     <div class="actions">
-      <button id="analyzeBtn" class="primary">Analysera upp till 1000</button>
-      <button id="stopAnalyze" class="danger" style="display:none">Stoppa</button>
+      <button id="analyzeBtn" class="primary">Analysera</button>
       <button id="clearInput" class="secondary">Töm</button>
-    </div>
-
-    <div id="bulkProgress" style="display:none;margin-top:11px;padding:9px 10px;background:#f7faf8;border:1px solid #dce8e1;border-radius:10px;">
-      <div style="height:7px;background:#e5ece8;border-radius:999px;overflow:hidden;">
-        <div id="bulkProgressBar" style="height:100%;width:0%;background:#12ad68;border-radius:999px;transition:width .2s ease;"></div>
-      </div>
-      <div id="bulkProgressText" style="margin-top:6px;font-size:10px;color:#6f7d75;">0 / 0</div>
     </div>
 
     <div id="analysisPreview" class="analysis-preview"></div>
