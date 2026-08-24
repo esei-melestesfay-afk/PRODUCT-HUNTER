@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Evergreen Product Hunter V3</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <div class="eyebrow">PRODUCT HUNTER V3</div>
+    <h1>Evergreen Product Hunter</h1>
+  </div>
+  <div class="pill">Deep Analysis</div>
+</header>
+
+<main class="layout">
+  <aside class="panel left">
+    <h2>1. Research</h2>
+
+    <label>Land</label>
+    <select id="country">
+      {% for code in country_order %}
+        <option value="{{ code }}">{{ countries[code]["name"] }}</option>
+      {% endfor %}
+    </select>
+
+    <label>Sökord</label>
+    <div class="keyword-box">
+      <strong id="keyword">trött på</strong>
+      <button id="copyKeyword" class="small">Kopiera</button>
+    </div>
+    <button id="nextKeyword">Nytt sökord</button>
+
+    <div class="filter-card">
+      <h3>Meta-filter</h3>
+      <div class="filter-row"><span>Status</span><b>Aktiv</b></div>
+      <div class="filter-row"><span>Format</span><b>Video</b></div>
+      <div class="filter-row"><span>Land</span><b>Valt land</b></div>
+      <div class="filter-row"><span>Stark signal</span><b>180+ dagar</b></div>
+    </div>
+
+    <div class="mini-note">
+      Land används för research men påverkar <b>inte</b> produktens score.
+    </div>
+  </aside>
+
+  <section class="panel center">
+    <div class="section-title">
+      <div>
+        <h2>2. Klistra in annonser</h2>
+        <p>Upp till 100. Separera helst med <code>---</code></p>
+      </div>
+      <span id="status" class="status">Redo</span>
+    </div>
+
+    <textarea id="adsInput" placeholder="Company: Företagsnamn
+Product: Produktnamn (om du vet)
+Started running on 2025-11-10
+Primary text: ...
+Headline: ...
+
+---
+
+Company: Nästa företag
+Started running on ...
+Primary text: ...
+Headline: ..."></textarea>
+
+    <div class="actions">
+      <button id="analyzeBtn" class="primary">Djupanalysera allt</button>
+      <button id="clearInput" class="secondary">Töm</button>
+    </div>
+
+    <div id="analysisPreview" class="analysis-preview"></div>
+  </section>
+
+  <aside class="panel right">
+    <div class="section-title">
+      <div>
+        <h2>3. Top 5</h2>
+        <p>Unika vinnarkandidater</p>
+      </div>
+      <button id="resetBtn" class="danger small">Nollställ</button>
+    </div>
+
+    <div id="topList">
+      {% if top5 %}
+        {% for item in top5 %}
+          <article class="rank-card">
+            <div class="rank-top">
+              <span class="rank-number">#{{ loop.index }}</span>
+              <span class="country-badge">{{ item.country }}</span>
+              <span class="decision">{{ item.decision }}</span>
+            </div>
+            <div class="rank-head">
+              <strong>{{ item.product_name }}</strong>
+              <span>{{ "%.1f"|format(item.final_score) }}</span>
+            </div>
+            <div class="company">{{ item.company }}</div>
+            <p>{{ item.problem_summary }}</p>
+            <div class="why">{{ item.why_short }}</div>
+            <div class="score-grid">
+              <span>Problem <b>{{ item.problem_strength }}/10</b></span>
+              <span>35+ <b>{{ item.fit35_score }}/10</b></span>
+              <span>Evergreen <b>{{ item.evergreen_score }}/10</b></span>
+              <span>Proof <b>{{ item.market_validation_score }}/10</b></span>
+            </div>
+          </article>
+        {% endfor %}
+      {% else %}
+        <div class="empty">Ingen produkt rankad ännu.</div>
+      {% endif %}
+    </div>
+  </aside>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
