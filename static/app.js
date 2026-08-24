@@ -5,12 +5,23 @@ const keywordTranslation = document.getElementById("keywordTranslation");
 const statusEl = document.getElementById("status");
 const adsInput = document.getElementById("adsInput");
 const analyzeBtn = document.getElementById("analyzeBtn");
+const stopAnalyzeBtn = document.getElementById("stopAnalyze");
 const topList = document.getElementById("topList");
 const analysisPreview = document.getElementById("analysisPreview");
 const claudeBadge = document.getElementById("claudeBadge");
+const bulkProgress = document.getElementById("bulkProgress");
+const bulkProgressBar = document.getElementById("bulkProgressBar");
+const bulkProgressText = document.getElementById("bulkProgressText");
 
 const BACKUP_KEY = "productHunterV4_adBackup";
 const MAX_BACKUP_ADS = 250;
+const MAX_BULK_ADS = 1000;
+const BULK_BATCH_SIZE = 40;
+const MAX_BATCH_CHARS = 220000;
+const MAX_PREVIEW_ITEMS = 20;
+
+let bulkRunning = false;
+let bulkCancelled = false;
 
 const SWEDISH_KEYWORD_MEANINGS = {
   NO: {
@@ -128,9 +139,11 @@ async function loadSystemStatus(){
       <span class="ai-dot"></span>
       <span>${d.claude_ready ? `Claude AI · ${esc(d.model)}` : "Claude API saknas"}</span>
     `;
-    analyzeBtn.disabled = !d.claude_ready;
+    analyzeBtn.disabled = bulkRunning || !d.claude_ready;
     if(!d.claude_ready){
       analyzeBtn.title = "Lägg ANTHROPIC_API_KEY i Render Environment Variables.";
+    }else{
+      analyzeBtn.title = "";
     }
     return !!d.claude_ready;
   }catch(_){
@@ -163,7 +176,7 @@ country.addEventListener("change", ()=>loadKeyword(true));
 document.getElementById("copyKeyword").addEventListener("click", async()=>{
   await navigator.clipboard.writeText(keyword.textContent);
   statusEl.textContent = "Kopierat";
-  setTimeout(()=>statusEl.textContent="Redo",1000);
+  setTimeout(()=>{ if(!bulkRunning) statusEl.textContent="Redo"; },1000);
 });
 
 document.addEventListener("click", async(e)=>{
@@ -182,6 +195,7 @@ document.addEventListener("click", async(e)=>{
 });
 
 document.getElementById("clearInput").addEventListener("click",()=>{
+  if(bulkRunning) return;
   adsInput.value="";
   analysisPreview.innerHTML="";
 });
@@ -263,6 +277,135 @@ function renderPreview(items){
   `).join("");
 }
 
+function previousNonEmpty(lines, from){
+  for(let i=from; i>=0; i--){
+    if(String(lines[i] || "").trim()) return i;
+  }
+  return -1;
+}
+
+function splitMetaSponsoredPaste(raw){
+  const lines = String(raw || "").split(/\r?\n/);
+  const sponsored = /^(?:sponsrad|sponsras|sponsored|gesponsert|gesponsord|werbung|annonce|mainos)$/i;
+  const starts = [];
+
+  for(let i=0; i<lines.length; i++){
+    if(!sponsored.test(lines[i].trim())) continue;
+    const p1 = previousNonEmpty(lines, i-1);
+    const p2 = p1 >= 0 ? previousNonEmpty(lines, p1-1) : -1;
+    if(p1 < 0) continue;
+
+    let start = p1;
+    if(p2 >= 0 && lines[p1].trim().toLocaleLowerCase() === lines[p2].trim().toLocaleLowerCase()){
+      start = p2;
+    }
+    if(!starts.length || starts[starts.length-1] !== start) starts.push(start);
+  }
+
+  if(starts.length < 2) return [];
+  const out = [];
+  for(let i=0; i<starts.length; i++){
+    const end = i+1 < starts.length ? starts[i+1] : lines.length;
+    const block = lines.slice(starts[i], end).join("\n").trim();
+    if(block) out.push(block);
+  }
+  return out;
+}
+
+function splitBulkAds(raw){
+  const text = String(raw || "").trim();
+  if(!text) return [];
+
+  const explicit = text
+    .split(/\n\s*(?:-{3,}|={3,}|#{3,}\s*AD\s*#{3,})\s*\n/i)
+    .map(x=>x.trim())
+    .filter(Boolean);
+  if(explicit.length > 1) return explicit;
+
+  const companyMatches = [...text.matchAll(/^(?:Company|Företag|Annonsör)\s*[:\-]\s*/gmi)];
+  if(companyMatches.length > 1){
+    const out = [];
+    for(let i=0; i<companyMatches.length; i++){
+      const start = companyMatches[i].index;
+      const end = i+1 < companyMatches.length ? companyMatches[i+1].index : text.length;
+      const block = text.slice(start, end).trim();
+      if(block) out.push(block);
+    }
+    return out;
+  }
+
+  const meta = splitMetaSponsoredPaste(text);
+  if(meta.length > 1) return meta;
+
+  return [text];
+}
+
+function blockIdentity(block){
+  const text = String(block || "");
+  const meta = text.match(/(?:Biblioteks?-id|Library\s*ID)\s*:\s*(\d{5,})/i);
+  if(meta) return `meta:${meta[1]}`;
+  return text.replace(/\s+/g," ").trim().toLocaleLowerCase();
+}
+
+function dedupeBlocks(blocks){
+  const seen = new Set();
+  const unique = [];
+  let duplicates = 0;
+  for(const block of blocks){
+    const key = blockIdentity(block);
+    if(seen.has(key)){
+      duplicates++;
+      continue;
+    }
+    seen.add(key);
+    unique.push(block);
+  }
+  return {unique, duplicates};
+}
+
+function makeSafeBatches(blocks){
+  const batches = [];
+  let current = [];
+  let chars = 0;
+
+  for(const rawBlock of blocks){
+    const block = String(rawBlock || "").trim();
+    if(!block) continue;
+    if(block.length > MAX_BATCH_CHARS){
+      throw new Error("En annons/textdel är extremt stor. Lägg --- mellan annonserna så systemet kan dela upp dem rätt.");
+    }
+
+    const extra = block.length + 12;
+    if(current.length && (current.length >= BULK_BATCH_SIZE || chars + extra > MAX_BATCH_CHARS)){
+      batches.push(current);
+      current = [];
+      chars = 0;
+    }
+    current.push(block);
+    chars += extra;
+  }
+  if(current.length) batches.push(current);
+  return batches;
+}
+
+function setProgress(done, total){
+  const safeTotal = Math.max(1, Number(total || 0));
+  const pct = Math.max(0, Math.min(100, (Number(done || 0) / safeTotal) * 100));
+  bulkProgress.style.display = "block";
+  bulkProgressBar.style.width = `${pct}%`;
+  bulkProgressText.textContent = `${done} / ${total} annonser`;
+}
+
+function hideProgress(){
+  bulkProgress.style.display = "none";
+  bulkProgressBar.style.width = "0%";
+  bulkProgressText.textContent = "0 / 0";
+}
+
+function sleep(ms){
+  return new Promise(resolve=>setTimeout(resolve, ms));
+}
+
 async function runAnalysis(raw, selectedCountry, selectedKeyword){
   const r = await fetch("/api/analyze",{
     method:"POST",
@@ -275,6 +418,46 @@ async function runAnalysis(raw, selectedCountry, selectedKeyword){
   return d;
 }
 
+async function runAnalysisBlocks(blocks, selectedCountry, selectedKeyword){
+  return runAnalysis(blocks.join("\n\n---\n\n"), selectedCountry, selectedKeyword);
+}
+
+async function runBatchWithRecovery(blocks, selectedCountry, selectedKeyword, depth=0){
+  let lastError = null;
+
+  try{
+    return [await runAnalysisBlocks(blocks, selectedCountry, selectedKeyword)];
+  }catch(e){
+    lastError = e;
+  }
+
+  if(depth === 0 && !bulkCancelled){
+    await sleep(1600);
+    try{
+      return [await runAnalysisBlocks(blocks, selectedCountry, selectedKeyword)];
+    }catch(e){
+      lastError = e;
+    }
+  }
+
+  if(blocks.length > 8 && depth < 3 && !bulkCancelled){
+    const mid = Math.ceil(blocks.length / 2);
+    const left = await runBatchWithRecovery(blocks.slice(0, mid), selectedCountry, selectedKeyword, depth+1);
+    if(bulkCancelled) return left;
+    const right = await runBatchWithRecovery(blocks.slice(mid), selectedCountry, selectedKeyword, depth+1);
+    return [...left, ...right];
+  }
+
+  throw lastError || new Error("Batchen kunde inte analyseras.");
+}
+
+stopAnalyzeBtn.addEventListener("click", ()=>{
+  if(!bulkRunning) return;
+  bulkCancelled = true;
+  stopAnalyzeBtn.disabled = true;
+  statusEl.textContent = "Stoppar efter nuvarande batch...";
+});
+
 analyzeBtn.addEventListener("click", async()=>{
   const raw = adsInput.value.trim();
   if(!raw){
@@ -282,18 +465,92 @@ analyzeBtn.addEventListener("click", async()=>{
     return;
   }
 
-  analyzeBtn.disabled=true;
-  statusEl.textContent="Claude analyserar varje annons...";
+  let parsed;
+  try{
+    parsed = splitBulkAds(raw);
+  }catch(e){
+    statusEl.textContent = e.message;
+    return;
+  }
+
+  if(parsed.length > MAX_BULK_ADS){
+    statusEl.textContent = `Jag hittade ${parsed.length} annonser. Max är ${MAX_BULK_ADS} per stor körning.`;
+    return;
+  }
+
+  const deduped = dedupeBlocks(parsed);
+  const blocks = deduped.unique;
+  if(!blocks.length){
+    statusEl.textContent = "Ingen annons hittades";
+    return;
+  }
+
+  let batches;
+  try{
+    batches = makeSafeBatches(blocks);
+  }catch(e){
+    statusEl.textContent = e.message;
+    return;
+  }
+
+  if(blocks.length >= 200){
+    const ok = confirm(
+      `${blocks.length} unika annonser hittades.\n\n` +
+      `Systemet analyserar dem automatiskt i ${batches.length} säkra batcher. Det kan ta tid och använder Claude API-kredit.\n\nStarta?`
+    );
+    if(!ok){
+      statusEl.textContent = "Avbrutet";
+      return;
+    }
+  }
+
+  bulkRunning = true;
+  bulkCancelled = false;
+  analyzeBtn.disabled = true;
+  stopAnalyzeBtn.disabled = false;
+  stopAnalyzeBtn.style.display = "inline-block";
+  setProgress(0, blocks.length);
+
+  let processed = 0;
+  let totalNew = 0;
+  let totalDuplicates = deduped.duplicates;
+  let libraryCount = 0;
+  let recent = [];
+  let lastTop = [];
 
   try{
-    const d = await runAnalysis(raw, country.value, keyword.textContent);
-    renderPreview(d.analyzed);
-    renderTop(d.top5);
-    statusEl.textContent = `${d.count} AI-analyserade · ${d.duplicates_skipped} dubletter · ${d.library_count} totalt`;
+    for(let i=0; i<batches.length; i++){
+      if(bulkCancelled) break;
+      const batch = batches[i];
+      statusEl.textContent = `Claude analyserar ${processed + 1}–${Math.min(processed + batch.length, blocks.length)} av ${blocks.length}...`;
+
+      const responses = await runBatchWithRecovery(batch, country.value, keyword.textContent);
+      for(const d of responses){
+        totalNew += Number(d.count || 0);
+        totalDuplicates += Number(d.duplicates_skipped || 0);
+        libraryCount = Number(d.library_count || libraryCount || 0);
+        lastTop = d.top5 || lastTop;
+        recent = [...recent, ...(d.analyzed || [])].slice(-MAX_PREVIEW_ITEMS);
+        renderTop(lastTop);
+        renderPreview([...recent].reverse());
+      }
+
+      processed += batch.length;
+      setProgress(processed, blocks.length);
+    }
+
+    if(bulkCancelled){
+      statusEl.textContent = `Stoppad · ${processed}/${blocks.length} behandlade · ${totalNew} nya`;
+    }else{
+      setProgress(blocks.length, blocks.length);
+      statusEl.textContent = `KLART · ${blocks.length} behandlade · ${totalNew} nya · ${totalDuplicates} dubletter · ${libraryCount} totalt`;
+    }
   }catch(e){
-    statusEl.textContent=e.message;
+    statusEl.textContent = `Stannade vid ${processed}/${blocks.length}: ${e.message}`;
   }finally{
-    analyzeBtn.disabled=false;
+    bulkRunning = false;
+    stopAnalyzeBtn.style.display = "none";
+    stopAnalyzeBtn.disabled = false;
     await loadSystemStatus();
   }
 });
@@ -312,6 +569,7 @@ async function maybeOfferRestore(){
     );
     if(!ok) return;
 
+    bulkRunning = true;
     analyzeBtn.disabled = true;
     const groups = {};
     for(const x of backup){
@@ -322,11 +580,11 @@ async function maybeOfferRestore(){
     let last = null;
     let restored = 0;
     for(const [c, raws] of Object.entries(groups)){
-      for(let i=0; i<raws.length; i+=100){
-        const batch = raws.slice(i,i+100).join("\n\n---\n\n");
+      const batches = makeSafeBatches(raws);
+      for(const batch of batches){
         statusEl.textContent = `Återställer backup... ${restored}/${backup.length}`;
-        last = await runAnalysis(batch, c, "browser-backup");
-        restored += Math.min(100, raws.length-i);
+        last = await runAnalysisBlocks(batch, c, "browser-backup");
+        restored += batch.length;
       }
     }
     if(last){
@@ -337,18 +595,23 @@ async function maybeOfferRestore(){
   }catch(e){
     statusEl.textContent = `Backup kunde inte återställas: ${e.message}`;
   }finally{
-    analyzeBtn.disabled = false;
+    bulkRunning = false;
     await loadSystemStatus();
   }
 }
 
 document.getElementById("resetBtn").addEventListener("click", async()=>{
+  if(bulkRunning){
+    statusEl.textContent = "Stoppa analysen först";
+    return;
+  }
   if(!confirm("Ta bort hela kandidatbiblioteket, Top 5 och webbläsarens backup?")) return;
   localStorage.removeItem(BACKUP_KEY);
   const r = await fetch("/api/reset",{method:"POST"});
   const d = await r.json();
   renderTop(d.top5||[]);
   analysisPreview.innerHTML="";
+  hideProgress();
   statusEl.textContent="Nollställt";
 });
 
