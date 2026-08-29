@@ -20,6 +20,8 @@ jobs:
         run: |
           python -m py_compile app.py database.py v5_engine.py analyzer.py keywords.py local_intelligence.py local_worker.py benchmark_embeddings.py sitecustomize.py
           node --check static/app.js
+          node --check static/persistence.js
+          node --check static/emotion-ui.js
           python - <<'PY'
           import json
           import sitecustomize
@@ -32,10 +34,52 @@ jobs:
           print('Taxonomy OK:', len(data['categories']))
           print('Multilingual lexicon OK')
           PY
+      - name: Problem emotion regression
+        env:
+          DATABASE_PATH: /tmp/product_hunter_emotion_smoke.db
+        run: |
+          rm -f /tmp/product_hunter_emotion_smoke.db
+          python - <<'PY'
+          from v5_engine import prepare_ad, _cluster_soft_scores
+
+          strong_raw='''Company: ReliefBrand\nProduct: Ergonomisk nackkudde\nReliefBrand\nSponsrad\nTrött på att vakna varje morgon med stel nacke och värk? Jag kan inte sova ordentligt och det gör ont varje dag. Äntligen en bekväm lösning som ger lättnad och stöd. Se skillnaden på sekunder.\nAktiv\nBiblioteks-id: 991100000000001\n1 jan 2026\n'''
+          weak_raw='''Company: TrendBrand\nProduct: Färgad mini-lampa\nTrendBrand\nSponsrad\nViral TikTok aesthetic cute gadget. Trending must-have med snygga färger och limited drop.\nAktiv\nBiblioteks-id: 991100000000002\n1 jan 2026\n'''
+
+          strong=prepare_ad(strong_raw,'SE','trött på')
+          weak=prepare_ad(weak_raw,'SE','viral')
+
+          for key in ('problem_strength','severity_score','frequency_score','emotion_score'):
+              assert strong[key] > weak[key], (key,strong[key],weak[key])
+
+          def soft(x):
+              return _cluster_soft_scores([{
+                  'problem_strength':x['problem_strength'],
+                  'severity_score':x['severity_score'],
+                  'frequency_score':x['frequency_score'],
+                  'emotion_score':x['emotion_score'],
+                  'clarity_score':x['clarity_score'],
+                  'demo_score':x['demo_score'],
+                  'direct_response_score':x['direct_response_score'],
+              }])
+
+          s,w=soft(strong),soft(weak)
+          assert s['problem_solving'] > w['problem_solving'], (s,w)
+          assert s['emotional_pressure'] > w['emotional_pressure'], (s,w)
+          assert s['purchase_urgency'] > w['purchase_urgency'], (s,w)
+          assert w['emotional_pressure'] < 5.0, w
+
+          # Same ad in another research country must retain identical score signals.
+          strong_de=prepare_ad(strong_raw,'DE','müde von')
+          for key in ('problem_strength','severity_score','frequency_score','emotion_score','demo_score'):
+              assert strong[key] == strong_de[key], (key,strong[key],strong_de[key])
+
+          print('V5.4 problem/emotion OK',{'strong':s,'weak':w})
+          PY
       - name: Flask smoke
         env:
           DATABASE_PATH: /tmp/product_hunter_test.db
         run: |
+          rm -f /tmp/product_hunter_test.db
           python - <<'PY'
           from app import app
           c = app.test_client()
