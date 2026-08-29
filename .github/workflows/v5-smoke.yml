@@ -18,14 +18,18 @@ jobs:
         run: pip install -r requirements.txt
       - name: Syntax
         run: |
-          python -m py_compile app.py database.py v5_engine.py analyzer.py keywords.py local_intelligence.py local_worker.py benchmark_embeddings.py
+          python -m py_compile app.py database.py v5_engine.py analyzer.py keywords.py local_intelligence.py local_worker.py benchmark_embeddings.py sitecustomize.py
           node --check static/app.js
           python - <<'PY'
           import json
+          import analyzer
           data=json.load(open('taxonomy.json',encoding='utf-8'))
           assert len(data.get('categories',[])) >= 40
           assert any(x.get('key') == 'unknown' for x in data['categories'])
+          assert 'kipu' in analyzer.LEX['pain'], 'Finnish V5 lexicon extension did not load'
+          assert 'schmerzen' in analyzer.LEX['pain'], 'German V5 lexicon extension did not load'
           print('Taxonomy OK:', len(data['categories']))
+          print('Multilingual lexicon OK')
           PY
       - name: Flask smoke
         env:
