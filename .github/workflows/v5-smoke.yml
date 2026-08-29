@@ -22,6 +22,7 @@ jobs:
           node --check static/app.js
           python - <<'PY'
           import json
+          import sitecustomize
           import analyzer
           data=json.load(open('taxonomy.json',encoding='utf-8'))
           assert len(data.get('categories',[])) >= 40
