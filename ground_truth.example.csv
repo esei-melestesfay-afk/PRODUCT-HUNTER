@@ -1,0 +1,7 @@
+text_a,text_b,same_product,language_pair,case_type
+"Slipp skrubba fogarna för hand med vår sladdlösa roterande rengöringsborste","Kabelloser elektrischer Spin-Schrubber für Bad und Fliesen",1,SV-DE,SAME_PRODUCT
+"Ergonomisk kudde för nacke och bättre sovkomfort","Orthopädisches Nackenkissen für Seitenschläfer",1,SV-DE,SAME_PRODUCT
+"Återanvändbar borste som tar bort hundhår från soffan","Herbruikbare dierenhaarverwijderaar voor bank en kleding",1,SV-NL,SAME_PRODUCT
+"Elektrisk rengöringsborste för kakel och fogar","Elektrisk tandborste med mjuka borsthuvuden",0,SV-SV,DIFF_PRODUCT_SAME_CATEGORY
+"Ryggstöd för bättre komfort när du sitter","Ergonomisk sittkudde för kontorsstol",0,SV-SV,SAME_PROBLEM_DIFF_PRODUCT
+"Vakuumpåsar för kläder och sängkläder","Knästöd för promenader och trappor",0,SV-SV,UNRELATED
