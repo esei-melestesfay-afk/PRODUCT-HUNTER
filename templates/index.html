@@ -91,6 +91,10 @@
             <p>{{ item.problem_summary }}</p>
             <div class="why">{{ item.why_short }}</div>
             <div class="score-grid">
+              <span>Problem <b>{{ item.problem_solving_score }}</b></span>
+              <span>Emotion <b>{{ item.emotional_pressure_score }}</b></span>
+              <span>Urgency <b>{{ item.purchase_urgency_score }}</b></span>
+              <span>Demo <b>{{ item.demo_wow_score }}</b></span>
               <span>Opportunity <b>{{ item.opportunity_score }}</b></span>
               <span>Market Proof <b>{{ item.market_proof }}</b></span>
               <span>Confidence <b>{{ item.confidence }}%</b></span>
@@ -111,5 +115,6 @@
 
 <script src="{{ url_for('static', filename='persistence.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='emotion-ui.js') }}"></script>
 </body>
 </html>
