@@ -1,0 +1,42 @@
+name: V5 Smoke Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install
+        run: pip install -r requirements.txt
+      - name: Syntax
+        run: |
+          python -m py_compile app.py database.py v5_engine.py analyzer.py keywords.py
+          node --check static/app.js
+      - name: Flask smoke
+        env:
+          DATABASE_PATH: /tmp/product_hunter_test.db
+        run: |
+          python - <<'PY'
+          from app import app
+          c = app.test_client()
+          r = c.get('/health')
+          assert r.status_code == 200, r.data
+          data = r.get_json()
+          assert data['engine'] == 'V5 Zero Credit'
+
+          ad = '''TestHome\nTestHome\nSponsrad\nSlipp jobbigt stök hemma varje dag. En enkel förvaringslösning som håller ordning.\nAktiv\nBiblioteks-id: 999999999999\n1 jan 2026\n'''
+          r = c.post('/api/analyze', json={'raw': ad, 'country': 'SE', 'keyword': 'slipp'})
+          assert r.status_code == 200, r.data
+          data = r.get_json()
+          assert data['engine'] == 'V5 Zero Credit'
+          assert data['count'] == 1
+          print('V5 smoke OK')
+          PY
