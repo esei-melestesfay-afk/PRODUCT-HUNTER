@@ -1,4 +1,6 @@
 (()=>{
+  const EMOTION_UI_VERSION="5.4";
+
   function signalText(x){
     const labels=Array.isArray(x?.signal_labels)?x.signal_labels:[];
     if(!labels.length) return "";
@@ -19,7 +21,7 @@
   renderTop=function(items){
     if(!items?.length){ topList.innerHTML=`<div class="empty">Ingen produkt rankad ännu.</div>`; return; }
     topList.innerHTML=items.map((x,i)=>`
-      <article class="rank-card" data-cluster-id="${x.id}">
+      <article class="rank-card" data-cluster-id="${x.id}" data-emotion-ui="${EMOTION_UI_VERSION}">
         <div class="rank-top"><span class="rank-number">#${i+1}</span><span class="country-badge">${esc(x.country||"")}</span><span class="zero-mini">0 kr</span><span class="decision ${decisionClass(x.decision)}">${esc(x.decision)}</span></div>
         <div class="rank-head"><strong>${esc(x.product_name)}</strong><span>${Number(x.opportunity_score||0).toFixed(1)}</span></div>
         <p>${esc(x.problem_summary||x.problem_type||"")}</p>
