@@ -8,6 +8,8 @@ on:
       - 'v5_engine.py'
       - 'analyzer.py'
       - 'app.py'
+      - 'static/emotion-ui.js'
+      - 'templates/index.html'
       - '.github/workflows/v5-emotion-audit.yml'
 
 jobs:
@@ -21,6 +23,8 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: pip install -r requirements.txt
+      - name: JavaScript syntax
+        run: node --check static/emotion-ui.js
       - name: Verify problem and emotional buying signals
         env:
           DATABASE_PATH: /tmp/product_hunter_emotion_audit.db
