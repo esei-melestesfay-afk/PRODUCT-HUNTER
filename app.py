@@ -1,320 +1,169 @@
-from flask import Flask, render_template, request, jsonify
-import sqlite3, json, os, re
-from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import uuid
 from datetime import datetime
 
-from analyzer import analyze_ad_base, split_ads, enrich_market_context, similarity
-from claude_analyzer import (
-    analyze_ads_with_claude,
-    is_configured as claude_configured,
-    model_name as claude_model_name,
+from flask import Flask, jsonify, render_template, request
+from sqlalchemy import delete, or_, select
+
+from analyzer import split_ads
+from database import (
+    Ad, Cluster, ClusterMembership, Job, JobChunk, SearchSession, TestResult,
+    Top5Snapshot, backend_name, init_db, persistent_backend, session_scope,
 )
 from keywords import COUNTRY_STRATEGIES, DEFAULT_ORDER, next_keyword
-
-BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = Path(os.environ.get("DATABASE_PATH", str(BASE_DIR / "product_hunter.db")))
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+from v5_engine import (
+    choose_or_create_cluster, deep_review_prompt, prepare_ad, recompute_cluster,
+    serialize_cluster, snapshot_top5, top5, watchlist,
+)
 
 app = Flask(__name__)
 
 
-def db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.row_factory = sqlite3.Row
-    return conn
+def claude_ready():
+    return bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip())
 
 
-def ensure_column(conn, table, column, definition):
-    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    if column not in cols:
-        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+def claude_model():
+    return (os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5").strip()
 
 
-def init_db():
-    conn = db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS candidates (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company TEXT NOT NULL,
-            score REAL NOT NULL DEFAULT 0,
-            problem_score REAL,
-            emotion_score REAL,
-            evergreen_score REAL,
-            fit35_score REAL,
-            clarity_score REAL,
-            value_score REAL,
-            longevity_score REAL,
-            ad_age_days INTEGER,
-            risk_penalty REAL,
-            trend_penalty REAL,
-            problem_summary TEXT,
-            verdict TEXT,
-            raw_text TEXT,
-            country TEXT,
-            keyword TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
-    ensure_column(conn, "candidates", "product_name", "TEXT")
-    ensure_column(conn, "candidates", "category", "TEXT")
-    ensure_column(conn, "candidates", "problem_type", "TEXT")
-    ensure_column(conn, "candidates", "confidence", "REAL")
-    ensure_column(conn, "candidates", "fingerprint", "TEXT")
-    ensure_column(conn, "candidates", "analysis_json", "TEXT")
-    ensure_column(conn, "candidates", "ai_used", "INTEGER DEFAULT 0")
-    ensure_column(conn, "candidates", "ai_model", "TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_candidates_fingerprint ON candidates(fingerprint)")
-    conn.commit()
-    conn.close()
+def _metrics_for_storage(item):
+    keys = [
+        "problem_strength", "severity_score", "frequency_score", "emotion_score",
+        "fit35_score", "evergreen_score", "clarity_score", "value_score",
+        "demo_score", "broad_market_score", "direct_response_score",
+        "trend_penalty", "compliance_penalty", "commodity_penalty",
+        "confidence_score", "base_score", "willingness_to_pay", "domain",
+        "strength_reasons", "warnings", "identity_tokens",
+    ]
+    return {k: item.get(k) for k in keys}
 
 
-def _clean_line(value):
-    return re.sub(r"\s+", " ", value or "").strip()
-
-
-def extract_meta_advertiser(raw_text, fallback="Okänt företag"):
-    """Deterministically extract the Meta advertiser/page name.
-
-    Claude is intentionally NOT allowed to invent this value. We prefer explicit
-    Company/Page labels, then the line directly before Meta's Sponsored marker,
-    then duplicated page-name lines common in Ad Library copy/paste.
-    """
-    raw_text = raw_text or ""
-
-    for label in ("Company", "Företag", "Annonsör", "Page name", "Sidnamn", "Page"):
-        match = re.search(rf"(?im)^\s*{re.escape(label)}\s*[:\-]\s*(.+?)\s*$", raw_text)
-        if match:
-            value = _clean_line(match.group(1))[:120]
-            if value:
-                return value
-
-    lines = [_clean_line(x) for x in raw_text.splitlines() if _clean_line(x)]
-    first = lines[:18]
-
-    sponsored = re.compile(
-        r"^(?:sponsrad|sponsras|sponsored|gesponsert|gesponsord|werbung|annonce|mainos)$",
-        re.I,
-    )
-    bad = re.compile(
-        r"(?:https?://|www\.|biblioteks?-id|library\s*id|plattform|platform|"
-        r"^aktiv$|^inaktiv$|^active$|^inactive$|^details?$|^see ad details$)",
-        re.I,
+def _ad_from_item(item, raw, country, keyword, search_session_id):
+    return Ad(
+        library_id=item.get("meta_library_id") or None,
+        fingerprint=item["fingerprint"],
+        company=item.get("company") or "Okänt företag",
+        company_normalized=item.get("company_normalized") or "",
+        product_name=item.get("product_name") or "Fysisk produkt",
+        category=item.get("category") or "Övrig vardagsprodukt",
+        problem_type=item.get("problem_type") or "Allmänt vardagsproblem",
+        problem_summary=item.get("problem_summary") or "",
+        country=country or "SE",
+        keyword=keyword or "",
+        search_session_id=search_session_id,
+        raw_text=raw[:30000],
+        ad_status=item.get("ad_status") or "unknown",
+        ad_start_date=item.get("ad_start_date") or "",
+        ad_end_date=item.get("ad_end_date") or "",
+        ad_age_days=item.get("ad_age_days"),
+        simhash=item.get("simhash") or "",
+        data_quality=float(item.get("data_quality") or 0),
+        metrics_json=json.dumps(_metrics_for_storage(item), ensure_ascii=False),
     )
 
-    def valid(candidate):
-        candidate = _clean_line(candidate)
-        if not candidate or len(candidate) > 90 or bad.search(candidate):
-            return False
-        if re.search(r"\b\d{1,2}\s+[A-Za-zÅÄÖåäö]{3,10}\s+20\d{2}\b", candidate):
-            return False
-        if len(candidate.split()) > 8:
-            return False
-        return True
 
-    # Meta Ad Library commonly pastes: PageName / PageName / Sponsored.
-    for i, line in enumerate(first):
-        if sponsored.match(line) and i > 0:
-            candidate = first[i - 1]
-            if valid(candidate):
-                return candidate
-
-    # Repeated short lines are a very strong page-name signal.
-    for i in range(len(first) - 1):
-        if first[i].casefold() == first[i + 1].casefold() and valid(first[i]):
-            return first[i]
-
-    # Last fallback: first plausible short line from the Meta paste.
-    for line in first[:6]:
-        if valid(line) and not sponsored.match(line):
-            return line
-
-    fallback = _clean_line(fallback)
-    return fallback or "Okänt företag"
+def _job_payload(job):
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "total_chunks": job.total_chunks,
+        "processed_chunks": job.processed_chunks,
+        "total_ads": job.total_ads,
+        "new_ads": job.new_ads,
+        "duplicate_ads": job.duplicate_ads,
+    }
 
 
-def row_to_item(row):
-    try:
-        item = json.loads(row["analysis_json"]) if row["analysis_json"] else {}
-    except Exception:
-        item = {}
+def _process_chunk(session, job, chunk, country, keyword):
+    chunk.status = "processing"
+    chunk.retry_count = int(chunk.retry_count or 0) + 1
+    session.flush()
 
-    # Always re-read the advertiser from the original Meta text. This also fixes
-    # older saved rows without requiring the user to reset the ranking.
-    detected_company = extract_meta_advertiser(row["raw_text"] or "", row["company"])
-    item["company"] = detected_company
-    item.setdefault("product_name", row["product_name"] or "Fysisk produkt")
-    item.setdefault("category", row["category"] or "Övrig vardagsprodukt")
-    item.setdefault("problem_type", row["problem_type"] or "Allmänt vardagsproblem")
-    item.setdefault("problem_summary", row["problem_summary"] or "Behöver mer analys.")
-    item.setdefault("base_score", row["score"] or 0)
-    item.setdefault("problem_strength", row["problem_score"] or 0)
-    item.setdefault("emotion_score", row["emotion_score"] or 0)
-    item.setdefault("evergreen_score", row["evergreen_score"] or 0)
-    item.setdefault("fit35_score", row["fit35_score"] or 0)
-    item.setdefault("clarity_score", row["clarity_score"] or 0)
-    item.setdefault("value_score", row["value_score"] or 0)
-    item.setdefault("longevity_score", row["longevity_score"] or 0)
-    item.setdefault("ad_age_days", row["ad_age_days"])
-    item.setdefault("confidence_score", row["confidence"] or 4.0)
-    item.setdefault("signature", [])
-    item["id"] = row["id"]
-    item["country"] = row["country"] or "SE"
-    item["keyword"] = row["keyword"] or ""
-    item["created_at"] = row["created_at"]
-    item["ai_used"] = bool(row["ai_used"]) or bool(item.get("ai_analysis"))
-    item["ai_model"] = row["ai_model"] or item.get("ai_model", "")
-    return item
+    blocks = split_ads(chunk.raw_text)
+    impacted_clusters = set()
+    new_ads = 0
+    duplicates = 0
 
+    search_session = session.get(SearchSession, job.search_session_id) if job.search_session_id else None
+    if search_session:
+        search_session.ads_pasted_count = int(search_session.ads_pasted_count or 0) + len(blocks)
 
-def load_all(limit=5000):
-    conn = db()
-    rows = conn.execute("SELECT * FROM candidates ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    return [row_to_item(r) for r in rows]
-
-
-def _apply_hybrid_score(item):
-    ai = item.get("ai_analysis") or {}
-    if not ai:
-        item["hybrid_final_score"] = 0.0
-        item["final_score"] = 0.0
-        item["decision"] = "LEGACY / EJ AI"
-        return item
-
-    semantic10 = float(ai.get("semantic_score", 0)) / 10.0
-    market10 = float(item.get("market_validation_score", 0))
-    longevity10 = float(item.get("longevity_score", 0))
-    local_conf10 = float(item.get("confidence_score", 0))
-    ai_conf10 = float(ai.get("confidence", 0))
-
-    final10 = (
-        semantic10 * 0.72 +
-        market10 * 0.12 +
-        longevity10 * 0.08 +
-        ai_conf10 * 0.05 +
-        local_conf10 * 0.03
-    )
-
-    if ai_conf10 < 4.5:
-        final10 = min(final10, 6.4)
-    if not ai.get("physical_product", True):
-        final10 = min(final10, 3.5)
-
-    final10 = max(0.0, min(10.0, final10))
-    item["hybrid_final_score"] = round(final10 * 10, 1)
-    item["final_score"] = item["hybrid_final_score"]
-
-    item["product_name"] = ai.get("product_name") or item.get("product_name")
-    item["category"] = ai.get("category") or item.get("category")
-    item["problem_summary"] = ai.get("core_problem") or item.get("problem_summary")
-    item["problem_strength"] = ai.get("problem_severity", item.get("problem_strength", 0))
-    item["severity_score"] = ai.get("problem_severity", item.get("severity_score", 0))
-    item["frequency_score"] = ai.get("problem_frequency", item.get("frequency_score", 0))
-    item["emotion_score"] = ai.get("emotional_pressure", item.get("emotion_score", 0))
-    item["fit35_score"] = ai.get("fit_35_plus", item.get("fit35_score", 0))
-    item["evergreen_score"] = ai.get("evergreen_strength", item.get("evergreen_score", 0))
-    item["clarity_score"] = ai.get("three_second_clarity", item.get("clarity_score", 0))
-    item["value_score"] = ai.get("value_proposition", item.get("value_score", 0))
-    item["demo_score"] = ai.get("demo_strength", item.get("demo_score", 0))
-    item["broad_market_score"] = ai.get("market_breadth", item.get("broad_market_score", 0))
-    item["willingness_to_pay"] = ai.get("willingness_to_pay", 0)
-    item["target_customer"] = ai.get("target_customer", "")
-    item["purchase_reason"] = ai.get("purchase_reason", "")
-    item["why_could_win"] = ai.get("why_it_could_win", "")
-    item["why_could_fail"] = ai.get("why_it_could_fail", "")
-    item["red_flags"] = ai.get("red_flags", [])
-    item["ai_confidence"] = ai.get("confidence", 0)
-    item["ai_semantic_score"] = ai.get("semantic_score", 0)
-
-    if (
-        item["final_score"] >= 82 and
-        item["problem_strength"] >= 7.0 and
-        item["evergreen_score"] >= 7.0 and
-        item["fit35_score"] >= 6.0 and
-        item["ai_confidence"] >= 6.0
-    ):
-        item["decision"] = "TESTA FÖRST"
-    elif (
-        item["final_score"] >= 72 and
-        item["problem_strength"] >= 6.0 and
-        item["evergreen_score"] >= 6.0
-    ):
-        item["decision"] = "STARK KANDIDAT"
-    elif item["final_score"] >= 62:
-        item["decision"] = "BEHÅLL / MER RESEARCH"
-    else:
-        item["decision"] = "SVAG / SKIPPA"
-
-    bits = []
-    if item["problem_strength"] >= 7.5:
-        bits.append("starkt problem")
-    if item["frequency_score"] >= 7:
-        bits.append("händer ofta")
-    if item["fit35_score"] >= 7:
-        bits.append("stark 35+ fit")
-    if item["evergreen_score"] >= 8:
-        bits.append("evergreen")
-    if item["willingness_to_pay"] >= 7:
-        bits.append("bra betalningsvilja")
-    if item.get("market_validation_score", 0) >= 7.5:
-        bits.append("marknadsbevis")
-    item["why_short"] = ", ".join(bits[:5]) or ai.get("why_it_could_win", "behöver mer bevis")[:180]
-    return item
-
-
-def rank_hybrid(items, limit=5):
-    ai_items = [x for x in items if x.get("ai_used") and x.get("ai_analysis")]
-    if not ai_items:
-        return []
-
-    enrich_market_context(ai_items)
-    for item in ai_items:
-        _apply_hybrid_score(item)
-
-    ordered = sorted(
-        ai_items,
-        key=lambda x: (
-            x.get("final_score", 0),
-            x.get("problem_strength", 0),
-            x.get("evergreen_score", 0),
-            x.get("ai_confidence", 0),
-            x.get("longevity_score", 0),
-        ),
-        reverse=True,
-    )
-
-    picked = []
-    for candidate in ordered:
-        if any(similarity(candidate, p) >= 0.72 for p in picked):
+    for raw in blocks:
+        item = prepare_ad(raw, country, keyword)
+        conditions = [Ad.fingerprint == item["fingerprint"]]
+        if item.get("meta_library_id"):
+            conditions.append(Ad.library_id == item["meta_library_id"])
+        existing = session.execute(select(Ad).where(or_(*conditions)).limit(1)).scalar_one_or_none()
+        if existing:
+            duplicates += 1
             continue
-        picked.append(candidate)
-        if len(picked) >= limit:
-            break
-    return picked
 
+        ad = _ad_from_item(item, raw, country, keyword, job.search_session_id)
+        session.add(ad)
+        session.flush()
+        cluster_id = choose_or_create_cluster(session, item, ad.id)
+        impacted_clusters.add(cluster_id)
+        new_ads += 1
 
-def get_top5():
-    return rank_hybrid(load_all(), 5)
+    recent_clusters = []
+    for cluster_id in impacted_clusters:
+        cluster = recompute_cluster(session, cluster_id)
+        if cluster:
+            recent_clusters.append(serialize_cluster(session, cluster))
+
+    chunk.status = "done"
+    chunk.error = ""
+    chunk.processed_at = datetime.utcnow()
+    job.status = "processing"
+    job.processed_chunks = int(job.processed_chunks or 0) + 1
+    job.total_ads = int(job.total_ads or 0) + len(blocks)
+    job.new_ads = int(job.new_ads or 0) + new_ads
+    job.duplicate_ads = int(job.duplicate_ads or 0) + duplicates
+
+    if job.total_chunks and job.processed_chunks >= job.total_chunks:
+        job.status = "done"
+        job.completed_at = datetime.utcnow()
+        snapshot_top5(session)
+
+    session.flush()
+    recent_clusters.sort(key=lambda x: (x.get("opportunity_score", 0), x.get("market_proof", 0)), reverse=True)
+    return {
+        "chunk_ads": len(blocks),
+        "chunk_new": new_ads,
+        "chunk_duplicates": duplicates,
+        "recent_clusters": recent_clusters[:20],
+    }
 
 
 @app.route("/")
 def index():
+    with session_scope() as session:
+        initial_top = top5(session, 5)
     return render_template(
         "index.html",
         countries=COUNTRY_STRATEGIES,
         country_order=DEFAULT_ORDER,
-        top5=get_top5(),
-        claude_ready=claude_configured(),
-        claude_model=claude_model_name(),
+        top5=initial_top,
+        claude_ready=claude_ready(),
+        claude_model=claude_model(),
+        database_backend=backend_name(),
+        database_persistent=persistent_backend(),
     )
 
 
 @app.route("/api/status")
 def api_status():
     return jsonify({
-        "claude_ready": claude_configured(),
-        "model": claude_model_name(),
-        "ranking_mode": "Claude + objective signals",
+        "engine": "V5 Zero Credit",
+        "zero_credit_default": True,
+        "claude_optional": claude_ready(),
+        "claude_model": claude_model(),
+        "database_backend": backend_name(),
+        "database_persistent": persistent_backend(),
     })
 
 
@@ -334,136 +183,225 @@ def api_keyword():
     })
 
 
-@app.route("/api/analyze", methods=["POST"])
-def api_analyze():
-    if not claude_configured():
-        return jsonify({
-            "error": "Claude API är inte ansluten. Lägg ANTHROPIC_API_KEY i Render Environment Variables."
-        }), 503
-
+@app.route("/api/jobs", methods=["POST"])
+def create_job():
     payload = request.get_json(silent=True) or {}
-    raw = payload.get("raw", "")
+    country = payload.get("country", "SE")
+    keyword = (payload.get("keyword") or "").strip()
+    try:
+        total_chunks = max(1, int(payload.get("total_chunks") or 1))
+    except Exception:
+        total_chunks = 1
+
+    search_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    with session_scope() as session:
+        session.add(SearchSession(id=search_id, country=country, keyword=keyword))
+        job = Job(id=job_id, search_session_id=search_id, status="pending", total_chunks=total_chunks)
+        session.add(job)
+        session.flush()
+        response = _job_payload(job)
+    return jsonify(response), 201
+
+
+@app.route("/api/jobs/<job_id>/chunks", methods=["POST"])
+def process_job_chunk(job_id):
+    payload = request.get_json(silent=True) or {}
+    raw = (payload.get("raw") or "").strip()
+    if not raw:
+        return jsonify({"error": "Tom annonsdel."}), 400
+    try:
+        chunk_index = int(payload.get("chunk_index", 0))
+    except Exception:
+        return jsonify({"error": "Ogiltigt chunk-index."}), 400
+
+    content_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    try:
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                return jsonify({"error": "Jobbet finns inte."}), 404
+            search = session.get(SearchSession, job.search_session_id) if job.search_session_id else None
+            country = search.country if search else "SE"
+            keyword = search.keyword if search else ""
+
+            existing = session.execute(
+                select(JobChunk).where(
+                    JobChunk.job_id == job_id,
+                    or_(JobChunk.chunk_index == chunk_index, JobChunk.content_hash == content_hash),
+                ).limit(1)
+            ).scalar_one_or_none()
+
+            if existing and existing.status == "done":
+                response = _job_payload(job)
+                response.update({
+                    "chunk_ads": 0,
+                    "chunk_new": 0,
+                    "chunk_duplicates": 0,
+                    "recent_clusters": [],
+                    "top5": top5(session, 5),
+                    "watchlist": watchlist(session, 5),
+                    "already_done": True,
+                })
+                return jsonify(response)
+
+            chunk = existing or JobChunk(
+                job_id=job_id,
+                chunk_index=chunk_index,
+                status="pending",
+                retry_count=0,
+                content_hash=content_hash,
+                raw_text=raw,
+            )
+            if not existing:
+                session.add(chunk)
+                session.flush()
+            else:
+                chunk.raw_text = raw
+                chunk.content_hash = content_hash
+
+            try:
+                result = _process_chunk(session, job, chunk, country, keyword)
+            except Exception as exc:
+                chunk.status = "failed"
+                chunk.error = str(exc)[:1000]
+                job.status = "partial"
+                session.flush()
+                raise
+
+            response = _job_payload(job)
+            response.update(result)
+            response["top5"] = top5(session, 5)
+            response["watchlist"] = watchlist(session, 5)
+            return jsonify(response)
+    except Exception as exc:
+        app.logger.exception("V5 chunk processing failed")
+        return jsonify({"error": f"Analysen stoppades: {str(exc)[:240]}"}), 500
+
+
+@app.route("/api/jobs/<job_id>")
+def get_job(job_id):
+    with session_scope() as session:
+        job = session.get(Job, job_id)
+        if not job:
+            return jsonify({"error": "Jobbet finns inte."}), 404
+        result = _job_payload(job)
+        result["top5"] = top5(session, 5)
+        result["watchlist"] = watchlist(session, 5)
+        return jsonify(result)
+
+
+@app.route("/api/analyze", methods=["POST"])
+def legacy_zero_credit_analyze():
+    """Compatibility endpoint. It no longer calls Claude automatically."""
+    payload = request.get_json(silent=True) or {}
+    raw = (payload.get("raw") or "").strip()
+    if not raw:
+        return jsonify({"error": "Klistra in minst en annons."}), 400
     country = payload.get("country", "SE")
     keyword = (payload.get("keyword") or "").strip()
 
-    if len(raw) > 300000:
-        return jsonify({"error": "För mycket text i en körning. Dela upp den i två omgångar."}), 400
-
-    blocks = split_ads(raw)[:100]
-    if not blocks:
-        return jsonify({"error": "Klistra in minst en annons."}), 400
-
-    local_items = [analyze_ad_base(b) for b in blocks]
-    for block, item in zip(blocks, local_items):
-        item["company"] = extract_meta_advertiser(block, item.get("company"))
-
-    conn = db()
-    fresh = []
-    duplicate_count = 0
-    for block, item in zip(blocks, local_items):
-        exists = conn.execute(
-            "SELECT id FROM candidates WHERE fingerprint=? LIMIT 1",
-            (item["fingerprint"],)
-        ).fetchone()
-        if exists:
-            duplicate_count += 1
-        else:
-            fresh.append((block, item))
-    conn.close()
-
-    if not fresh:
-        all_items = load_all()
+    search_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    with session_scope() as session:
+        session.add(SearchSession(id=search_id, country=country, keyword=keyword))
+        job = Job(id=job_id, search_session_id=search_id, status="pending", total_chunks=1)
+        session.add(job)
+        chunk = JobChunk(
+            job_id=job_id,
+            chunk_index=0,
+            status="pending",
+            retry_count=0,
+            content_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+            raw_text=raw,
+        )
+        session.add(chunk)
+        session.flush()
+        result = _process_chunk(session, job, chunk, country, keyword)
         return jsonify({
-            "count": 0,
-            "duplicates_skipped": duplicate_count,
-            "analyzed": [],
-            "top5": rank_hybrid(all_items, 5),
-            "library_count": len(all_items),
-            "claude_model": claude_model_name(),
+            "count": result["chunk_new"],
+            "duplicates_skipped": result["chunk_duplicates"],
+            "analyzed": result["recent_clusters"],
+            "top5": top5(session, 5),
+            "watchlist": watchlist(session, 5),
+            "library_count": session.query(Ad).count(),
+            "engine": "V5 Zero Credit",
         })
-
-    fresh_blocks = [x[0] for x in fresh]
-    ai_results, ai_batch_errors = analyze_ads_with_claude(fresh_blocks)
-
-    merged = []
-    for (_, local), ai in zip(fresh, ai_results):
-        item = dict(local)
-        item["ai_used"] = True
-        item["ai_model"] = claude_model_name()
-        item["ai_analysis"] = ai
-        item["ai_semantic_score"] = ai["semantic_score"]
-        item["product_name"] = ai.get("product_name") or item.get("product_name")
-        item["category"] = ai.get("category") or item.get("category")
-        item["problem_summary"] = ai.get("core_problem") or item.get("problem_summary")
-        merged.append(item)
-
-    conn = db()
-    inserted_ids = []
-    for item in merged:
-        cur = conn.execute("""
-            INSERT INTO candidates (
-                company, score, problem_score, emotion_score, evergreen_score,
-                fit35_score, clarity_score, value_score, longevity_score,
-                ad_age_days, risk_penalty, trend_penalty, problem_summary,
-                verdict, raw_text, country, keyword, created_at,
-                product_name, category, problem_type, confidence, fingerprint,
-                analysis_json, ai_used, ai_model
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            item["company"], item["base_score"], item["problem_strength"], item["emotion_score"],
-            item["evergreen_score"], item["fit35_score"], item["clarity_score"], item["value_score"],
-            item["longevity_score"], item["ad_age_days"], item["compliance_penalty"],
-            item["trend_penalty"], item["problem_summary"], "",
-            item["raw_text"], country, keyword, datetime.now().isoformat(timespec="seconds"),
-            item["product_name"], item["category"], item["problem_type"],
-            item["confidence_score"], item["fingerprint"], json.dumps(item, ensure_ascii=False),
-            1, claude_model_name()
-        ))
-        inserted_ids.append(cur.lastrowid)
-    conn.commit()
-    conn.close()
-
-    all_items = load_all()
-    top5 = rank_hybrid(all_items, 5)
-    all_by_id = {x.get("id"): x for x in all_items}
-    new_items = [all_by_id[i] for i in inserted_ids if i in all_by_id]
-
-    return jsonify({
-        "count": len(new_items),
-        "duplicates_skipped": duplicate_count,
-        "analyzed": new_items,
-        "top5": top5,
-        "library_count": len(all_items),
-        "claude_model": claude_model_name(),
-        "batch_warnings": ai_batch_errors,
-    })
 
 
 @app.route("/api/top")
 def api_top():
-    items = load_all()
-    return jsonify({
-        "top5": rank_hybrid(items, 5),
-        "library_count": len(items),
-        "claude_ready": claude_configured(),
-    })
+    with session_scope() as session:
+        return jsonify({
+            "top5": top5(session, 5),
+            "watchlist": watchlist(session, 5),
+            "library_count": session.query(Ad).count(),
+            "cluster_count": session.query(Cluster).count(),
+            "engine": "V5 Zero Credit",
+        })
+
+
+@app.route("/api/clusters/<int:cluster_id>/deep-review", methods=["POST"])
+def deep_review(cluster_id):
+    if not claude_ready():
+        return jsonify({"error": "Claude är inte ansluten. Zero Credit-läget fungerar ändå utan Claude."}), 503
+
+    with session_scope() as session:
+        cluster = session.get(Cluster, cluster_id)
+        if not cluster:
+            return jsonify({"error": "Produkten finns inte."}), 404
+        ads = session.execute(
+            select(Ad).join(ClusterMembership, ClusterMembership.ad_id == Ad.id)
+            .where(ClusterMembership.cluster_id == cluster_id)
+            .order_by(Ad.ad_age_days.desc()).limit(4)
+        ).scalars().all()
+        payload = serialize_cluster(session, cluster)
+        prompt = deep_review_prompt(payload, ads)
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2, timeout=120.0)
+        response = client.messages.create(
+            model=claude_model(),
+            max_tokens=1400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text").strip()
+        match = re.search(r"\{.*\}", text, flags=re.S)
+        review = json.loads(match.group(0) if match else text)
+    except Exception as exc:
+        app.logger.exception("Claude deep review failed")
+        return jsonify({"error": f"Claude-granskningen misslyckades: {str(exc)[:220]}"}), 502
+
+    with session_scope() as session:
+        cluster = session.get(Cluster, cluster_id)
+        cluster.deep_review_json = json.dumps(review, ensure_ascii=False)
+        session.flush()
+        return jsonify({"ok": True, "review": review, "cluster": serialize_cluster(session, cluster)})
 
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    conn = db()
-    conn.execute("DELETE FROM candidates")
-    conn.commit()
-    conn.close()
-    return jsonify({"ok": True, "top5": []})
+    with session_scope() as session:
+        session.execute(delete(Top5Snapshot))
+        session.execute(delete(TestResult))
+        session.execute(delete(ClusterMembership))
+        session.execute(delete(JobChunk))
+        session.execute(delete(Job))
+        session.execute(delete(Cluster))
+        session.execute(delete(Ad))
+        session.execute(delete(SearchSession))
+    return jsonify({"ok": True, "top5": [], "watchlist": []})
 
 
 @app.route("/health")
 def health():
     return jsonify({
         "status": "ok",
-        "claude_configured": claude_configured(),
-        "model": claude_model_name(),
+        "engine": "V5 Zero Credit",
+        "database": backend_name(),
+        "persistent_database": persistent_backend(),
+        "claude_optional": claude_ready(),
     })
 
 
