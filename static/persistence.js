@@ -128,7 +128,6 @@
 
   async function restoreIfNeeded(){
     try{
-      const status=await originalFetch("/api/status").then(r=>r.json());
       const top=await originalFetch("/api/top").then(r=>r.json());
       if(Number(top.library_count||0)>0) return;
 
@@ -169,9 +168,9 @@
       }
 
       if(statusEl) statusEl.textContent=`Återställt · ${restored} delar`;
-      if(!status.database_persistent){
-        setTimeout(()=>location.reload(),700);
-      }
+      // Always reload after a successful restore so Top 5 and the current
+      // database state are rendered from the restored server data.
+      setTimeout(()=>location.reload(),700);
     }catch(err){
       console.warn("Product Hunter auto-restore warning",err);
     }
