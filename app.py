@@ -8,6 +8,8 @@ from datetime import datetime
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import delete, or_, select
 
+# Explicit import: applies the V5 multilingual zero-credit lexicon before analyzer is used.
+import sitecustomize  # noqa: F401
 from analyzer import split_ads
 from database import (
     Ad, Cluster, ClusterMembership, Job, JobChunk, SearchSession, TestResult,
