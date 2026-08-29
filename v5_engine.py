@@ -32,9 +32,63 @@ CATEGORY_WTP = {
     "Övrig vardagsprodukt": 5.0,
 }
 
+PAIN_PHRASES = (
+    "ont", "smärta", "värk", "stel", "öm", "obehag", "kan inte", "svårt att", "jobbigt",
+    "krångel", "läcker", "spill", "stök", "röra", "smuts", "lukt", "tungt", "besvär",
+    "pain", "ache", "stiff", "sore", "uncomfortable", "can't", "cannot", "struggle", "difficult",
+    "vondt", "vanskelig", "svært ved", "müde von", "schwer zu", "moeilijk om",
+    "kipu", "vaikea", "sattuu",
+)
+
+RECURRING_PHRASES = (
+    "varje dag", "varje natt", "varje morgon", "hela tiden", "varje gång", "ofta", "ständigt",
+    "every day", "every night", "every morning", "every time", "constantly", "often",
+    "hver dag", "hver natt", "hver morgen", "jeden tag", "jede nacht", "jeden morgen",
+    "elke dag", "elke nacht", "elke ochtend", "joka päivä", "joka yö", "joka aamu",
+)
+
+CONSEQUENCE_PHRASES = (
+    "kan inte sova", "svårt att sova", "vaknar med", "undviker", "orkar inte", "hindrar mig",
+    "kan inte böja", "kan inte lyfta", "pinsamt", "skäms", "orolig", "rädd", "stressad",
+    "can't sleep", "cannot sleep", "wake up with", "avoid", "stops me", "embarrassing", "ashamed",
+    "worried", "afraid", "anxious", "keeps me awake", "can't bend", "can't lift",
+    "våkner med", "kan ikke sove", "vågner med", "wache mit", "kann nicht schlafen",
+    "word wakker met", "kan niet slapen", "herään", "en voi nukkua",
+)
+
+FRUSTRATION_PHRASES = (
+    "trött på", "frustrerad", "irriterande", "hatar", "aldrig mer", "less på", "stress",
+    "tired of", "fed up", "frustrated", "annoying", "hate", "never again",
+    "lei av", "irriterende", "træt af", "irriterende", "müde von", "genervt", "nie wieder",
+    "moe van", "irritant", "nooit meer", "kyllästynyt", "ärsyttävä",
+)
+
+RELIEF_PHRASES = (
+    "slipp", "äntligen", "lättnad", "bekvämare", "tryggare", "utan att behöva", "spara tid",
+    "mindre krångel", "frihet", "smidigt", "finally", "relief", "peace of mind", "easier", "comfort",
+    "without having to", "save time", "endelig", "slipp", "endlich", "ohne", "eindelijk", "zonder gedoe",
+    "vihdoin", "helpompi", "vähemmän vaivaa",
+)
+
+DEMO_PHRASES = (
+    "före och efter", "se skillnaden", "så fungerar", "på sekunder", "ett tryck", "med ett drag",
+    "utan verktyg", "direkt", "automatiskt", "before and after", "see the difference", "how it works",
+    "in seconds", "one press", "one move", "without tools", "instantly", "automatic",
+    "før og etter", "før og efter", "vorher nachher", "in sekunden", "voor en na", "in seconden",
+)
+
+NICE_TO_HAVE_PHRASES = (
+    "viral", "trending", "tiktok", "aesthetic", "cute gadget", "must have", "limited drop", "collectible",
+    "snygg pryl", "cool pryl", "trend", "hype",
+)
+
 
 def clamp(v, lo=0.0, hi=100.0):
     return max(lo, min(hi, float(v)))
+
+
+def clamp10(v):
+    return max(0.0, min(10.0, float(v)))
 
 
 def norm_text(value):
@@ -46,6 +100,81 @@ def norm_text(value):
 
 def normalize_company(value):
     return re.sub(r"[^a-z0-9åäöæøüéß]+", " ", (value or "").casefold()).strip()[:180]
+
+
+def _phrase_hits(text, phrases):
+    low = (text or "").casefold()
+    return sum(1 for phrase in phrases if phrase in low)
+
+
+def _upgrade_problem_emotion(item, raw):
+    pain_hits = _phrase_hits(raw, PAIN_PHRASES)
+    recurring_hits = _phrase_hits(raw, RECURRING_PHRASES)
+    consequence_hits = _phrase_hits(raw, CONSEQUENCE_PHRASES)
+    frustration_hits = _phrase_hits(raw, FRUSTRATION_PHRASES)
+    relief_hits = _phrase_hits(raw, RELIEF_PHRASES)
+    demo_hits = _phrase_hits(raw, DEMO_PHRASES)
+    nice_hits = _phrase_hits(raw, NICE_TO_HAVE_PHRASES)
+
+    base_problem = float(item.get("problem_strength") or 0)
+    base_severity = float(item.get("severity_score") or 0)
+    base_frequency = float(item.get("frequency_score") or 0)
+    base_emotion = float(item.get("emotion_score") or 0)
+    base_clarity = float(item.get("clarity_score") or 0)
+    base_demo = float(item.get("demo_score") or 0)
+    base_direct = float(item.get("direct_response_score") or 0)
+
+    has_problem_anchor = (pain_hits + consequence_hits) > 0 or base_problem >= 4.5
+    has_recurring_context = recurring_hits > 0 or base_frequency >= 5.5
+    has_emotional_context = (frustration_hits + consequence_hits + relief_hits) > 0
+
+    phrase_problem = 0.0
+    if has_problem_anchor:
+        phrase_problem = clamp10(
+            3.0 + min(3.2, pain_hits * 0.9) + min(2.0, consequence_hits * 1.0)
+            + min(1.5, recurring_hits * 0.75) + min(0.8, frustration_hits * 0.4)
+        )
+
+    severity_phrase = 0.0
+    if has_problem_anchor:
+        severity_phrase = clamp10(2.2 + min(3.6, pain_hits * 1.0) + min(3.0, consequence_hits * 1.2))
+
+    frequency_phrase = 0.0
+    if has_problem_anchor and has_recurring_context:
+        frequency_phrase = clamp10(4.2 + min(4.8, recurring_hits * 1.35))
+
+    emotion_phrase = 0.0
+    if has_problem_anchor and has_emotional_context:
+        emotion_phrase = clamp10(
+            2.0 + min(2.8, consequence_hits * 1.0) + min(2.0, frustration_hits * 0.8)
+            + min(1.7, relief_hits * 0.55) + (0.8 if has_recurring_context else 0)
+        )
+
+    demo_phrase = clamp10(2.5 + demo_hits * 1.3) if demo_hits else 0.0
+
+    if nice_hits and not has_problem_anchor:
+        emotion_phrase = min(emotion_phrase, 2.5)
+        phrase_problem = min(phrase_problem, 2.5)
+
+    item["problem_strength"] = round(max(base_problem, 0.60 * base_problem + 0.20 * phrase_problem + 0.12 * base_severity + 0.08 * base_frequency, phrase_problem), 1)
+    item["severity_score"] = round(max(base_severity, 0.68 * base_severity + 0.32 * severity_phrase, severity_phrase), 1)
+    item["frequency_score"] = round(max(base_frequency, 0.72 * base_frequency + 0.28 * frequency_phrase, frequency_phrase), 1)
+    item["emotion_score"] = round(max(base_emotion, 0.62 * base_emotion + 0.38 * emotion_phrase, emotion_phrase), 1)
+    item["demo_score"] = round(max(base_demo, 0.68 * base_demo + 0.32 * demo_phrase, demo_phrase), 1)
+    if demo_hits:
+        item["clarity_score"] = round(max(base_clarity, clamp10(base_clarity * 0.7 + demo_phrase * 0.3)), 1)
+        item["direct_response_score"] = round(max(base_direct, clamp10(base_direct * 0.75 + demo_phrase * 0.25)), 1)
+
+    item["emotion_context"] = {
+        "pain_hits": pain_hits,
+        "recurring_hits": recurring_hits,
+        "consequence_hits": consequence_hits,
+        "frustration_hits": frustration_hits,
+        "relief_hits": relief_hits,
+        "demo_hits": demo_hits,
+        "nice_to_have_hits": nice_hits,
+    }
+    return item
 
 
 def extract_meta_advertiser(raw_text, fallback="Okänt företag"):
@@ -172,6 +301,7 @@ def _generic_product(name):
 
 def prepare_ad(raw, country="SE", keyword=""):
     item = analyze_ad_base(raw)
+    item = _upgrade_problem_emotion(item, raw)
     item["company"] = extract_meta_advertiser(raw, item.get("company"))
     item["company_normalized"] = normalize_company(item["company"])
     item["country"] = country or "SE"
@@ -294,6 +424,29 @@ def _cross_market_count(ads):
     return count
 
 
+def _cluster_soft_scores(metrics):
+    if not metrics:
+        return {"problem_solving": 0.0, "emotional_pressure": 0.0, "purchase_urgency": 0.0, "demo_wow": 0.0}
+
+    def avg(key, default=0.0):
+        return statistics.mean([float(m.get(key, default) or 0) for m in metrics])
+
+    problem = avg("problem_strength")
+    severity = avg("severity_score")
+    frequency = avg("frequency_score")
+    emotion = avg("emotion_score")
+    clarity = avg("clarity_score")
+    demo = avg("demo_score")
+    direct = avg("direct_response_score")
+
+    return {
+        "problem_solving": clamp10(0.42 * problem + 0.28 * severity + 0.18 * frequency + 0.12 * clarity),
+        "emotional_pressure": clamp10(0.52 * emotion + 0.25 * severity + 0.15 * frequency + 0.08 * problem),
+        "purchase_urgency": clamp10(0.34 * severity + 0.27 * frequency + 0.24 * emotion + 0.15 * direct),
+        "demo_wow": clamp10(0.55 * demo + 0.30 * clarity + 0.15 * direct),
+    }
+
+
 def recompute_cluster(session, cluster_id):
     cluster = session.get(Cluster, cluster_id)
     if not cluster:
@@ -315,7 +468,6 @@ def recompute_cluster(session, cluster_id):
 
     advertiser_score = _log_score(len(companies), 15)
     age_score = _piecewise_age_score(median_age)
-    cross_market_score = _log_score(cross_markets, 6)
     creative_score = _log_score(distinct_creatives, 10)
     if concurrent:
         creative_score = min(100.0, creative_score * 1.15)
@@ -330,25 +482,40 @@ def recompute_cluster(session, cluster_id):
     advertiser_quality = statistics.mean(per_company_quality) if per_company_quality else 0.0
 
     market_proof = clamp(
-        0.30 * advertiser_score + 0.25 * age_score + 0.20 * cross_market_score
-        + 0.15 * creative_score + 0.10 * advertiser_quality
+        0.38 * advertiser_score + 0.30 * age_score
+        + 0.20 * creative_score + 0.12 * advertiser_quality
     )
 
     metrics = [json.loads(a.metrics_json or "{}") for a in ads]
     avg = lambda key, default=0.0: statistics.mean([float(m.get(key, default) or 0) for m in metrics]) if metrics else default
     problem = avg("problem_strength")
+    severity = avg("severity_score")
+    frequency = avg("frequency_score")
     emotion = avg("emotion_score")
     fit35 = avg("fit35_score")
     evergreen = avg("evergreen_score")
     clarity = avg("clarity_score")
     demo = avg("demo_score")
+    direct = avg("direct_response_score")
     broad = avg("broad_market_score")
     wtp = avg("willingness_to_pay", 5.0)
 
+    soft = _cluster_soft_scores(metrics)
+    problem_solving = soft["problem_solving"]
+    emotional_pressure = soft["emotional_pressure"]
+    purchase_urgency = soft["purchase_urgency"]
+    demo_wow = soft["demo_wow"]
+
     opportunity = (
-        0.25 * market_proof + 0.15 * problem * 10 + 0.10 * emotion * 10
-        + 0.10 * fit35 * 10 + 0.10 * evergreen * 10 + 0.10 * wtp * 10
-        + 0.10 * ((clarity + demo) / 2.0) * 10 + 0.10 * broad * 10
+        0.20 * market_proof
+        + 0.20 * problem_solving * 10
+        + 0.13 * emotional_pressure * 10
+        + 0.10 * purchase_urgency * 10
+        + 0.08 * fit35 * 10
+        + 0.10 * evergreen * 10
+        + 0.08 * wtp * 10
+        + 0.06 * demo_wow * 10
+        + 0.05 * broad * 10
     )
 
     commodity = avg("commodity_penalty")
@@ -368,28 +535,49 @@ def recompute_cluster(session, cluster_id):
     stage_days = statistics.median(active_ages) if active_ages else median_age
     stage = age_status(stage_days)
 
-    if opportunity >= 82 and problem >= 7 and evergreen >= 7 and confidence >= 60:
+    if opportunity >= 82 and problem_solving >= 7 and evergreen >= 7 and confidence >= 60:
         decision = "TESTA FÖRST"
-    elif opportunity >= 72 and problem >= 6 and evergreen >= 6:
+    elif opportunity >= 72 and problem_solving >= 6 and evergreen >= 6:
         decision = "STARK KANDIDAT"
     elif opportunity >= 62:
         decision = "BEHÅLL / MER RESEARCH"
     else:
         decision = "SVAG / SKIPPA"
 
+    signal_labels = []
+    if problem_solving >= 7.2:
+        signal_labels.append("STRONG PROBLEM PRODUCT")
+    if emotional_pressure >= 7.0:
+        signal_labels.append("HIGH EMOTIONAL BUYING MOTIVE")
+    if purchase_urgency >= 7.0:
+        signal_labels.append("HIGH PURCHASE URGENCY")
+    if demo_wow >= 7.0:
+        signal_labels.append("STRONG DEMO PRODUCT")
+    if problem_solving < 4.0 and emotional_pressure < 4.0:
+        signal_labels.append("NICE-TO-HAVE RISK")
+
     breakdown = {
         "market_proof": {
             "independent_advertisers": len(companies), "advertiser_score": round(advertiser_score, 1),
             "median_runtime_days": median_age, "age_score": round(age_score, 1),
-            "cross_market_countries": cross_markets, "cross_market_score": round(cross_market_score, 1),
+            "cross_market_countries": cross_markets,
+            "cross_market_score": None,
+            "cross_market_note": "Visas som evidens men påverkar aldrig score eller rank.",
             "distinct_creatives": distinct_creatives, "creative_iteration_score": round(creative_score, 1),
             "advertiser_quality_score": round(advertiser_quality, 1),
         },
         "opportunity": {
-            "problem_severity": round(problem, 1), "emotion": round(emotion, 1),
+            "problem_solving": round(problem_solving, 1),
+            "emotional_pressure": round(emotional_pressure, 1),
+            "purchase_urgency": round(purchase_urgency, 1),
+            "demo_wow": round(demo_wow, 1),
+            "signal_labels": signal_labels,
+            "problem_severity": round(problem, 1), "raw_emotion": round(emotion, 1),
+            "severity": round(severity, 1), "frequency": round(frequency, 1),
             "fit_35plus": round(fit35, 1), "evergreen": round(evergreen, 1),
             "willingness_to_pay": round(wtp, 1), "clarity": round(clarity, 1),
-            "demo": round(demo, 1), "market_breadth": round(broad, 1),
+            "demo": round(demo, 1), "direct_response": round(direct, 1),
+            "market_breadth": round(broad, 1),
         },
         "penalties": {
             "commodity": round(commodity * 5.0, 1), "trend": round(trend * 5.0, 1),
@@ -429,12 +617,18 @@ def _why_short(cluster, breakdown):
     mp = breakdown.get("market_proof", {}) if isinstance(breakdown, dict) else {}
     opp = breakdown.get("opportunity", {}) if isinstance(breakdown, dict) else {}
     bits = []
+    if opp.get("problem_solving", 0) >= 7.2:
+        bits.append("starkt verkligt problem")
+    if opp.get("emotional_pressure", 0) >= 7.0:
+        bits.append("högt emotionellt köp-motiv")
+    if opp.get("purchase_urgency", 0) >= 7.0:
+        bits.append("hög köp-urgency")
+    if opp.get("demo_wow", 0) >= 7.0:
+        bits.append("stark demo")
     if mp.get("independent_advertisers", 0) >= 2:
         bits.append(f"{mp['independent_advertisers']} oberoende företag")
     if (mp.get("median_runtime_days") or 0) >= 180:
         bits.append("lång annonslivslängd")
-    if opp.get("problem_severity", 0) >= 7:
-        bits.append("starkt problem")
     if opp.get("evergreen", 0) >= 7:
         bits.append("evergreen")
     if opp.get("fit_35plus", 0) >= 7:
@@ -457,12 +651,18 @@ def serialize_cluster(session, cluster):
     companies = sorted({a.company for a in ads if a.company and a.company != "Okänt företag"})
     countries = sorted({a.country for a in ads if a.country})
     representative = ads[0] if ads else None
+    opp = breakdown.get("opportunity", {}) if isinstance(breakdown, dict) else {}
     return {
         "id": cluster.id, "product_name": cluster.name, "category": cluster.category,
         "problem_type": cluster.problem_type,
         "problem_summary": representative.problem_summary if representative else "",
         "market_proof": cluster.market_proof or 0, "opportunity_score": cluster.opportunity_score or 0,
         "final_score": cluster.opportunity_score or 0, "confidence": cluster.confidence or 0,
+        "problem_solving_score": opp.get("problem_solving", 0),
+        "emotional_pressure_score": opp.get("emotional_pressure", 0),
+        "purchase_urgency_score": opp.get("purchase_urgency", 0),
+        "demo_wow_score": opp.get("demo_wow", 0),
+        "signal_labels": opp.get("signal_labels", []),
         "data_quality": cluster.data_quality or 0, "age_status": cluster.age_status,
         "decision": cluster.decision, "ad_count": len(ads),
         "independent_advertisers": len(companies), "companies": companies[:12],
@@ -510,4 +710,4 @@ def deep_review_prompt(cluster_payload, ads):
             "company": ad.company, "country": ad.country, "status": ad.ad_status,
             "runtime_days": ad.ad_age_days, "text": ad.raw_text[:3500],
         })
-    return f"""Du djupgranskar EN produktmöjlighet för ecommerce research. Du får INTE påstå lönsamhet som fakta.\n\nProduktcluster:\n{json.dumps(cluster_payload, ensure_ascii=False)}\n\nObserverade annonser:\n{json.dumps(ad_samples, ensure_ascii=False)}\n\nReturnera ENDAST JSON med fälten: problem_severity (0-10), emotional_pressure (0-10), fit_35plus (0-10), evergreen_strength (0-10), willingness_to_pay (0-10), commodity_risk (0-10), seasonality_risk (0-10), confidence (0-10), summary_sv (max 3 korta meningar), strongest_reason_sv, biggest_risk_sv. Var skeptisk och basera dig bara på materialet ovan."""
+    return f"""Du djupgranskar EN produktmöjlighet för ecommerce research. Du får INTE påstå lönsamhet som fakta.\n\nProduktcluster:\n{json.dumps(cluster_payload, ensure_ascii=False)}\n\nObserverade annonser:\n{json.dumps(ad_samples, ensure_ascii=False)}\n\nReturnera ENDAST JSON med fälten: problem_severity (0-10), emotional_pressure (0-10), purchase_urgency (0-10), demo_wow (0-10), fit_35plus (0-10), evergreen_strength (0-10), willingness_to_pay (0-10), commodity_risk (0-10), seasonality_risk (0-10), confidence (0-10), summary_sv (max 3 korta meningar), strongest_reason_sv, biggest_risk_sv. Var skeptisk och basera dig bara på materialet ovan."""
