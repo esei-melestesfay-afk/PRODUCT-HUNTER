@@ -1,0 +1,145 @@
+name: V5 Final Audit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'app.py'
+      - 'analyzer.py'
+      - 'database.py'
+      - 'v5_engine.py'
+      - 'static/app.js'
+      - 'static/persistence.js'
+      - 'templates/index.html'
+      - 'render.yaml'
+      - 'requirements.txt'
+      - '.github/workflows/v5-final-audit.yml'
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: JavaScript syntax
+        run: |
+          node --check static/app.js
+          node --check static/persistence.js
+
+      - name: Python syntax
+        run: python -m compileall -q app.py analyzer.py database.py v5_engine.py local_intelligence.py local_worker.py
+
+      - name: Verify core V5 behavior
+        env:
+          DATABASE_PATH: /tmp/product_hunter_final_audit.db
+        run: |
+          rm -f /tmp/product_hunter_final_audit.db
+          python - <<'PY'
+          import os
+          from datetime import datetime, timezone
+
+          assert not os.environ.get('ANTHROPIC_API_KEY'), 'Final audit must run in Zero-Credit mode'
+
+          from analyzer import ad_runtime_info
+          from v5_engine import prepare_ad
+          from app import app
+
+          # 1) Inactive ads use their real start/end interval, not today.
+          inactive = ad_runtime_info('Inaktiv\n29 okt 2025\n30 okt 2025')
+          assert inactive['status'] == 'inactive', inactive
+          assert inactive['days'] == 2, inactive
+          assert inactive['start'] == '2025-10-29', inactive
+          assert inactive['end'] == '2025-10-30', inactive
+
+          # 2) Active ads keep running to today.
+          active = ad_runtime_info('Aktiv\n29 okt 2025')
+          expected = (datetime.now(timezone.utc).date() - datetime(2025,10,29).date()).days + 1
+          assert active['status'] == 'active', active
+          assert active['days'] == expected, (active, expected)
+          assert active['end'] == '', active
+
+          # 3) Country is display/research context only; it must not change score signals.
+          raw = '''Company: TestBrand\nProduct: Ergonomiskt ryggstöd\nTestBrand\nSponsrad\nSlipp stel rygg och obehag varje dag. Bekväm ergonomisk lösning för hem och bil.\nAktiv\nBiblioteks-id: 990000000000001\n1 jan 2026\n'''
+          se = prepare_ad(raw, 'SE', 'slipp')
+          de = prepare_ad(raw, 'DE', 'müde von')
+          score_keys = [
+              'problem_strength','severity_score','frequency_score','emotion_score',
+              'fit35_score','evergreen_score','clarity_score','value_score',
+              'demo_score','broad_market_score','direct_response_score',
+              'trend_penalty','compliance_penalty','commodity_penalty',
+              'confidence_score','base_score','willingness_to_pay','data_quality'
+          ]
+          for key in score_keys:
+              assert se.get(key) == de.get(key), (key, se.get(key), de.get(key))
+
+          c = app.test_client()
+
+          # 4) Health/status confirms Zero Credit default.
+          status = c.get('/api/status')
+          assert status.status_code == 200, status.data
+          sj = status.get_json()
+          assert sj['zero_credit_default'] is True, sj
+          assert sj['engine'] == 'V5 Zero Credit', sj
+          assert sj['claude_optional'] is False, sj
+
+          # 5) Chunk processing is idempotent: replaying the same chunk must not duplicate ads.
+          ad1 = '''Company: BrandA\nProduct: Rengöringsborste\nBrandA\nSponsrad\nSpara tid vid städning. Elektrisk borste rengör badrum och fogar enklare.\nAktiv\nBiblioteks-id: 990000000000101\n1 jan 2026\n'''
+          ad2 = '''Company: BrandB\nProduct: Sömnkudde\nBrandB\nSponsrad\nVaknar du stel? Bekväm kudde för bättre sömn och stöd för nacke.\nAktiv\nBiblioteks-id: 990000000000102\n1 feb 2026\n'''
+          raw_chunk = ad1 + '\n\n---\n\n' + ad2
+          job = c.post('/api/jobs', json={'country':'SE','keyword':'slipp','total_chunks':1})
+          assert job.status_code == 201, job.data
+          job_id = job.get_json()['job_id']
+          first = c.post(f'/api/jobs/{job_id}/chunks', json={'chunk_index':0,'raw':raw_chunk})
+          assert first.status_code == 200, first.data
+          fj = first.get_json()
+          assert fj['chunk_new'] == 2, fj
+          assert fj['status'] == 'done', fj
+
+          replay = c.post(f'/api/jobs/{job_id}/chunks', json={'chunk_index':0,'raw':raw_chunk})
+          assert replay.status_code == 200, replay.data
+          rj = replay.get_json()
+          assert rj.get('already_done') is True, rj
+
+          top = c.get('/api/top').get_json()
+          assert top['library_count'] == 2, top
+          assert 1 <= top['cluster_count'] <= 2, top
+          assert 1 <= len(top['top5']) <= 2, top
+
+          # 6) Re-importing an existing Meta Library ID with changed copy must remain a duplicate.
+          changed = ad1.replace('Spara tid vid städning.', 'HELT NY COPY men samma riktiga Meta-annons.')
+          dup = c.post('/api/analyze', json={'country':'SE','keyword':'slipp','raw':changed})
+          assert dup.status_code == 200, dup.data
+          dj = dup.get_json()
+          assert dj['count'] == 0, dj
+          assert dj['duplicates_skipped'] == 1, dj
+          assert dj['library_count'] == 2, dj
+
+          # 7) Claude is not silently called when no key exists.
+          deep = c.post('/api/clusters/1/deep-review')
+          assert deep.status_code == 503, deep.data
+
+          # 8) Reset really clears ranked/server data.
+          reset = c.post('/api/reset')
+          assert reset.status_code == 200, reset.data
+          after = c.get('/api/top').get_json()
+          assert after['library_count'] == 0, after
+          assert after['cluster_count'] == 0, after
+          assert after['top5'] == [], after
+
+          print('FINAL AUDIT OK: dates, country-neutrality, zero-credit, idempotency, dedupe, reset')
+          PY
+
+      - name: Verify deployment config
+        run: |
+          grep -q 'healthCheckPath: /health' render.yaml
+          grep -q 'key: DATABASE_URL' render.yaml
+          grep -q 'psycopg2-binary' requirements.txt
+          grep -q 'persistence.js' templates/index.html
