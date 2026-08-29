@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Evergreen Product Hunter V4</title>
+  <title>Evergreen Product Hunter V5</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
 <header class="topbar">
   <div>
-    <div class="eyebrow">PRODUCT HUNTER V4</div>
+    <div class="eyebrow">PRODUCT HUNTER V5</div>
     <h1>Evergreen Product Hunter</h1>
   </div>
   <div class="header-status">
-    <div id="claudeBadge" class="ai-badge {{ 'online' if claude_ready else 'offline' }}">
+    <div id="engineBadge" class="ai-badge online">
       <span class="ai-dot"></span>
-      <span>{{ 'Claude AI ansluten' if claude_ready else 'Claude API saknas' }}</span>
+      <span>V5 · ZERO CREDIT</span>
     </div>
-    <div class="pill">AI + Evidence</div>
+    <div class="pill">Market Proof + Opportunity</div>
   </div>
 </header>
 
@@ -48,8 +48,8 @@
       <div class="filter-row"><span>Stark signal</span><b>180+ dagar</b></div>
     </div>
 
-    <div class="mini-note">Land visas i rankingen men påverkar <b>inte</b> poängen.</div>
-    <div class="mini-note ai-note">Claude läser betydelsen i annonsen. Kodmotorn väger sedan in datum, dubletter och marknadsbevis.</div>
+    <div class="mini-note">Land visas i datan men ger <b>ingen landbonus</b>.</div>
+    <div class="mini-note ai-note">Vanlig analys använder ingen Claude-credit. Claude används bara om du själv väljer Djupgranska.</div>
   </aside>
 
   <section class="panel center">
@@ -61,7 +61,7 @@
     <textarea id="adsInput" placeholder="Klistra in annonser här..."></textarea>
 
     <div class="actions">
-      <button id="analyzeBtn" class="primary" onclick="this.dataset.running='1';this.disabled=true;document.getElementById('status').textContent='Startar analys…';">Analysera</button>
+      <button id="analyzeBtn" class="primary">Analysera</button>
       <button id="clearInput" class="secondary">Töm</button>
     </div>
 
@@ -72,7 +72,7 @@
     <div class="section-title">
       <div>
         <h2>3. Top 5</h2>
-        <p>Claude + objektiva signaler</p>
+        <p>Opportunity + observerat Market Proof</p>
       </div>
       <button id="resetBtn" class="danger small">Nollställ</button>
     </div>
@@ -84,34 +84,28 @@
             <div class="rank-top">
               <span class="rank-number">#{{ loop.index }}</span>
               <span class="country-badge">{{ item.country }}</span>
-              <span class="ai-mini">AI</span>
+              <span class="zero-mini">0 kr</span>
               <span class="decision">{{ item.decision }}</span>
             </div>
-            <div class="rank-head">
-              <strong>{{ item.product_name }}</strong>
-              <span>{{ "%.1f"|format(item.final_score) }}</span>
-            </div>
-            <div class="company-row">
-              <span class="company-label">Företag</span>
-              <strong class="company-name">{{ item.company }}</strong>
-              <button type="button" class="copy-company small" data-company="{{ item.company|e }}">Kopiera</button>
-            </div>
+            <div class="rank-head"><strong>{{ item.product_name }}</strong><span>{{ "%.1f"|format(item.opportunity_score) }}</span></div>
             <p>{{ item.problem_summary }}</p>
             <div class="why">{{ item.why_short }}</div>
             <div class="score-grid">
-              <span>Problem <b>{{ item.problem_strength }}/10</b></span>
-              <span>35+ <b>{{ item.fit35_score }}/10</b></span>
-              <span>Evergreen <b>{{ item.evergreen_score }}/10</b></span>
-              <span>Proof <b>{{ item.market_validation_score }}/10</b></span>
-              <span>Betalningsvilja <b>{{ item.willingness_to_pay }}/10</b></span>
-              <span>AI confidence <b>{{ item.ai_confidence }}/10</b></span>
+              <span>Opportunity <b>{{ item.opportunity_score }}</b></span>
+              <span>Market Proof <b>{{ item.market_proof }}</b></span>
+              <span>Confidence <b>{{ item.confidence }}%</b></span>
+              <span>Företag <b>{{ item.independent_advertisers }}</b></span>
+              <span>Annonser <b>{{ item.ad_count }}</b></span>
+              <span>Status <b>{{ item.age_status }}</b></span>
             </div>
           </article>
         {% endfor %}
       {% else %}
-        <div class="empty">Ingen Claude-analyserad produkt rankad ännu.</div>
+        <div class="empty">Ingen produkt rankad ännu.</div>
       {% endif %}
     </div>
+
+    <div id="watchList" class="watch-list"></div>
   </aside>
 </main>
 
