@@ -9,15 +9,15 @@
 <body>
 <header class="topbar">
   <div>
-    <div class="eyebrow">PRODUCT HUNTER V5</div>
+    <div class="eyebrow">PRODUCT HUNTER V5.5</div>
     <h1>Evergreen Product Hunter</h1>
   </div>
   <div class="header-status">
     <div id="engineBadge" class="ai-badge online">
       <span class="ai-dot"></span>
-      <span>V5 · ZERO CREDIT</span>
+      <span>{% if claude_ready %}V5 · CLAUDE HYBRID{% else %}CLAUDE EJ ANSLUTEN{% endif %}</span>
     </div>
-    <div class="pill">Market Proof + Opportunity</div>
+    <div class="pill">Market Proof + V5 + Claude</div>
   </div>
 </header>
 
@@ -49,7 +49,7 @@
     </div>
 
     <div class="mini-note">Land visas i datan men ger <b>ingen landbonus</b>.</div>
-    <div class="mini-note ai-note">Vanlig analys använder ingen Claude-credit. Claude används bara om du själv väljer Djupgranska.</div>
+    <div class="mini-note ai-note">V5 läser, deduplicerar och grupperar alla annonser först. Sedan slutgranskar Claude bara de starkaste unika produktgrupperna. Oförändrade produkter använder cachad Claude-granskning i stället för att kosta igen.</div>
   </aside>
 
   <section class="panel center">
@@ -72,7 +72,7 @@
     <div class="section-title">
       <div>
         <h2>3. Top 5</h2>
-        <p>Opportunity + observerat Market Proof</p>
+        <p>Hybrid Final Score · Market Proof + V5 + Claude</p>
       </div>
       <button id="resetBtn" class="danger small">Nollställ</button>
     </div>
@@ -84,18 +84,20 @@
             <div class="rank-top">
               <span class="rank-number">#{{ loop.index }}</span>
               <span class="country-badge">{{ item.country }}</span>
-              <span class="zero-mini">0 kr</span>
+              <span class="zero-mini">{% if item.claude_reviewed %}CLAUDE ✓{% else %}V5{% endif %}</span>
               <span class="decision">{{ item.decision }}</span>
             </div>
-            <div class="rank-head"><strong>{{ item.product_name }}</strong><span>{{ "%.1f"|format(item.opportunity_score) }}</span></div>
+            <div class="rank-head"><strong>{{ item.product_name }}</strong><span>{{ "%.1f"|format(item.final_score) }}</span></div>
             <p>{{ item.problem_summary }}</p>
             <div class="why">{{ item.why_short }}</div>
             <div class="score-grid">
+              <span>FINAL <b>{{ item.final_score }}</b></span>
+              <span>V5 <b>{{ item.deterministic_score }}</b></span>
+              <span>Claude <b>{% if item.claude_reviewed %}{{ item.claude_score }}{% else %}—{% endif %}</b></span>
               <span>Problem <b>{{ item.problem_solving_score }}</b></span>
               <span>Emotion <b>{{ item.emotional_pressure_score }}</b></span>
               <span>Urgency <b>{{ item.purchase_urgency_score }}</b></span>
               <span>Demo <b>{{ item.demo_wow_score }}</b></span>
-              <span>Opportunity <b>{{ item.opportunity_score }}</b></span>
               <span>Market Proof <b>{{ item.market_proof }}</b></span>
               <span>Confidence <b>{{ item.confidence }}%</b></span>
               <span>Företag <b>{{ item.independent_advertisers }}</b></span>
@@ -116,5 +118,6 @@
 <script src="{{ url_for('static', filename='persistence.js') }}"></script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script src="{{ url_for('static', filename='emotion-ui.js') }}"></script>
+<script src="{{ url_for('static', filename='hybrid-ui.js') }}"></script>
 </body>
 </html>
