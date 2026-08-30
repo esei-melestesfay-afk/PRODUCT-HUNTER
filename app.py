@@ -1,35 +1,32 @@
 import hashlib
 import json
 import os
-import re
 import uuid
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template, request
 from sqlalchemy import delete, or_, select
 
-# Explicit import: applies the V5 multilingual zero-credit lexicon before analyzer is used.
+# Applies the multilingual V5 lexicon before analyzer is used.
 import sitecustomize  # noqa: F401
 from analyzer import split_ads
+from claude_ranker import (
+    finalist_limit, is_configured as claude_ready, model_name as claude_model,
+    review_clusters_with_claude,
+)
 from database import (
     Ad, Cluster, ClusterMembership, Job, JobChunk, SearchSession, TestResult,
     Top5Snapshot, backend_name, init_db, persistent_backend, session_scope,
 )
+from hybrid_view import serialize_cluster, snapshot_top5, top5, watchlist
 from keywords import COUNTRY_STRATEGIES, DEFAULT_ORDER, next_keyword
-from v5_engine import (
-    choose_or_create_cluster, deep_review_prompt, prepare_ad, recompute_cluster,
-    serialize_cluster, snapshot_top5, top5, watchlist,
-)
+from v5_engine import choose_or_create_cluster, prepare_ad, recompute_cluster
 
 app = Flask(__name__)
 
 
-def claude_ready():
-    return bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip())
-
-
-def claude_model():
-    return (os.environ.get("ANTHROPIC_MODEL") or "claude-sonnet-5").strip()
+def engine_name():
+    return "V5 Claude Hybrid" if claude_ready() else "V5 Deterministic Fallback"
 
 
 def _metrics_for_storage(item):
@@ -129,16 +126,42 @@ def _process_chunk(session, job, chunk, country, keyword):
     if job.total_chunks and job.processed_chunks >= job.total_chunks:
         job.status = "done"
         job.completed_at = datetime.utcnow()
-        snapshot_top5(session)
 
     session.flush()
-    recent_clusters.sort(key=lambda x: (x.get("opportunity_score", 0), x.get("market_proof", 0)), reverse=True)
+    recent_clusters.sort(
+        key=lambda x: (x.get("final_score", 0), x.get("market_proof", 0)),
+        reverse=True,
+    )
     return {
         "chunk_ads": len(blocks),
         "chunk_new": new_ads,
         "chunk_duplicates": duplicates,
         "recent_clusters": recent_clusters[:20],
     }
+
+
+def _finalize_with_claude(session, job):
+    if job.status != "done":
+        return {"attempted": False, "reviewed": 0, "cached": 0, "reason": "job_not_done"}
+
+    claude_meta = {
+        "attempted": False,
+        "reviewed": 0,
+        "cached": 0,
+        "model": claude_model(),
+        "finalist_limit": finalist_limit(),
+    }
+    if claude_ready():
+        try:
+            claude_meta.update(review_clusters_with_claude(session))
+        except Exception as exc:
+            app.logger.exception("Automatic Claude finalist review failed")
+            claude_meta["error"] = str(exc)[:260]
+    else:
+        claude_meta["error"] = "ANTHROPIC_API_KEY saknas"
+
+    snapshot_top5(session)
+    return claude_meta
 
 
 @app.route("/")
@@ -160,10 +183,13 @@ def index():
 @app.route("/api/status")
 def api_status():
     return jsonify({
-        "engine": "V5 Zero Credit",
-        "zero_credit_default": True,
+        "engine": engine_name(),
+        "claude_auto": claude_ready(),
         "claude_optional": claude_ready(),
         "claude_model": claude_model(),
+        "claude_finalist_limit": finalist_limit(),
+        "zero_credit_default": not claude_ready(),
+        "zero_credit_fallback": True,
         "database_backend": backend_name(),
         "database_persistent": persistent_backend(),
     })
@@ -271,10 +297,13 @@ def process_job_chunk(job_id):
                 session.flush()
                 raise
 
+            claude_meta = _finalize_with_claude(session, job) if job.status == "done" else None
             response = _job_payload(job)
             response.update(result)
             response["top5"] = top5(session, 5)
             response["watchlist"] = watchlist(session, 5)
+            if claude_meta is not None:
+                response["claude"] = claude_meta
             return jsonify(response)
     except Exception as exc:
         app.logger.exception("V5 chunk processing failed")
@@ -294,8 +323,7 @@ def get_job(job_id):
 
 
 @app.route("/api/analyze", methods=["POST"])
-def legacy_zero_credit_analyze():
-    """Compatibility endpoint. It no longer calls Claude automatically."""
+def legacy_hybrid_analyze():
     payload = request.get_json(silent=True) or {}
     raw = (payload.get("raw") or "").strip()
     if not raw:
@@ -320,6 +348,7 @@ def legacy_zero_credit_analyze():
         session.add(chunk)
         session.flush()
         result = _process_chunk(session, job, chunk, country, keyword)
+        claude_meta = _finalize_with_claude(session, job)
         return jsonify({
             "count": result["chunk_new"],
             "duplicates_skipped": result["chunk_duplicates"],
@@ -327,7 +356,8 @@ def legacy_zero_credit_analyze():
             "top5": top5(session, 5),
             "watchlist": watchlist(session, 5),
             "library_count": session.query(Ad).count(),
-            "engine": "V5 Zero Credit",
+            "engine": engine_name(),
+            "claude": claude_meta,
         })
 
 
@@ -339,47 +369,34 @@ def api_top():
             "watchlist": watchlist(session, 5),
             "library_count": session.query(Ad).count(),
             "cluster_count": session.query(Cluster).count(),
-            "engine": "V5 Zero Credit",
+            "engine": engine_name(),
+            "claude_auto": claude_ready(),
         })
 
 
 @app.route("/api/clusters/<int:cluster_id>/deep-review", methods=["POST"])
 def deep_review(cluster_id):
     if not claude_ready():
-        return jsonify({"error": "Claude är inte ansluten. Zero Credit-läget fungerar ändå utan Claude."}), 503
-
-    with session_scope() as session:
-        cluster = session.get(Cluster, cluster_id)
-        if not cluster:
-            return jsonify({"error": "Produkten finns inte."}), 404
-        ads = session.execute(
-            select(Ad).join(ClusterMembership, ClusterMembership.ad_id == Ad.id)
-            .where(ClusterMembership.cluster_id == cluster_id)
-            .order_by(Ad.ad_age_days.desc()).limit(4)
-        ).scalars().all()
-        payload = serialize_cluster(session, cluster)
-        prompt = deep_review_prompt(payload, ads)
+        return jsonify({"error": "Claude är inte ansluten. Lägg in ANTHROPIC_API_KEY."}), 503
 
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], max_retries=2, timeout=120.0)
-        response = client.messages.create(
-            model=claude_model(),
-            max_tokens=1400,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text").strip()
-        match = re.search(r"\{.*\}", text, flags=re.S)
-        review = json.loads(match.group(0) if match else text)
+        with session_scope() as session:
+            cluster = session.get(Cluster, cluster_id)
+            if not cluster:
+                return jsonify({"error": "Produkten finns inte."}), 404
+            meta = review_clusters_with_claude(session, [cluster_id], force=True)
+            cluster = session.get(Cluster, cluster_id)
+            item = serialize_cluster(session, cluster)
+            return jsonify({
+                "ok": True,
+                "review": item.get("deep_review") or {},
+                "cluster": item,
+                "claude": meta,
+                "top5": top5(session, 5),
+            })
     except Exception as exc:
         app.logger.exception("Claude deep review failed")
         return jsonify({"error": f"Claude-granskningen misslyckades: {str(exc)[:220]}"}), 502
-
-    with session_scope() as session:
-        cluster = session.get(Cluster, cluster_id)
-        cluster.deep_review_json = json.dumps(review, ensure_ascii=False)
-        session.flush()
-        return jsonify({"ok": True, "review": review, "cluster": serialize_cluster(session, cluster)})
 
 
 @app.route("/api/reset", methods=["POST"])
@@ -400,10 +417,11 @@ def api_reset():
 def health():
     return jsonify({
         "status": "ok",
-        "engine": "V5 Zero Credit",
+        "engine": engine_name(),
         "database": backend_name(),
         "persistent_database": persistent_backend(),
-        "claude_optional": claude_ready(),
+        "claude_auto": claude_ready(),
+        "claude_model": claude_model(),
     })
 
 
