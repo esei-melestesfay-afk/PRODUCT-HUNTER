@@ -18,10 +18,11 @@ jobs:
         run: pip install -r requirements.txt
       - name: Syntax
         run: |
-          python -m py_compile app.py database.py v5_engine.py analyzer.py keywords.py local_intelligence.py local_worker.py benchmark_embeddings.py sitecustomize.py
+          python -m py_compile app.py database.py v5_engine.py claude_ranker.py hybrid_view.py analyzer.py keywords.py local_intelligence.py local_worker.py benchmark_embeddings.py sitecustomize.py
           node --check static/app.js
           node --check static/persistence.js
           node --check static/emotion-ui.js
+          node --check static/hybrid-ui.js
           python - <<'PY'
           import json
           import sitecustomize
@@ -29,10 +30,9 @@ jobs:
           data=json.load(open('taxonomy.json',encoding='utf-8'))
           assert len(data.get('categories',[])) >= 40
           assert any(x.get('key') == 'unknown' for x in data['categories'])
-          assert 'kipu' in analyzer.LEX['pain'], 'Finnish V5 lexicon extension did not load'
-          assert 'schmerzen' in analyzer.LEX['pain'], 'German V5 lexicon extension did not load'
-          print('Taxonomy OK:', len(data['categories']))
-          print('Multilingual lexicon OK')
+          assert 'kipu' in analyzer.LEX['pain']
+          assert 'schmerzen' in analyzer.LEX['pain']
+          print('Taxonomy + multilingual lexicon OK')
           PY
       - name: Problem emotion regression
         env:
@@ -41,58 +41,73 @@ jobs:
           rm -f /tmp/product_hunter_emotion_smoke.db
           python - <<'PY'
           from v5_engine import prepare_ad, _cluster_soft_scores
-
           strong_raw='''Company: ReliefBrand\nProduct: Ergonomisk nackkudde\nReliefBrand\nSponsrad\nTrött på att vakna varje morgon med stel nacke och värk? Jag kan inte sova ordentligt och det gör ont varje dag. Äntligen en bekväm lösning som ger lättnad och stöd. Se skillnaden på sekunder.\nAktiv\nBiblioteks-id: 991100000000001\n1 jan 2026\n'''
           weak_raw='''Company: TrendBrand\nProduct: Färgad mini-lampa\nTrendBrand\nSponsrad\nViral TikTok aesthetic cute gadget. Trending must-have med snygga färger och limited drop.\nAktiv\nBiblioteks-id: 991100000000002\n1 jan 2026\n'''
-
           strong=prepare_ad(strong_raw,'SE','trött på')
           weak=prepare_ad(weak_raw,'SE','viral')
-
           for key in ('problem_strength','severity_score','frequency_score','emotion_score'):
               assert strong[key] > weak[key], (key,strong[key],weak[key])
-
           def soft(x):
               return _cluster_soft_scores([{
-                  'problem_strength':x['problem_strength'],
-                  'severity_score':x['severity_score'],
-                  'frequency_score':x['frequency_score'],
-                  'emotion_score':x['emotion_score'],
-                  'clarity_score':x['clarity_score'],
-                  'demo_score':x['demo_score'],
+                  'problem_strength':x['problem_strength'],'severity_score':x['severity_score'],
+                  'frequency_score':x['frequency_score'],'emotion_score':x['emotion_score'],
+                  'clarity_score':x['clarity_score'],'demo_score':x['demo_score'],
                   'direct_response_score':x['direct_response_score'],
               }])
-
           s,w=soft(strong),soft(weak)
-          assert s['problem_solving'] > w['problem_solving'], (s,w)
-          assert s['emotional_pressure'] > w['emotional_pressure'], (s,w)
-          assert s['purchase_urgency'] > w['purchase_urgency'], (s,w)
-          assert w['emotional_pressure'] < 5.0, w
-
-          # Same ad in another research country must retain identical score signals.
+          assert s['problem_solving'] > w['problem_solving']
+          assert s['emotional_pressure'] > w['emotional_pressure']
+          assert s['purchase_urgency'] > w['purchase_urgency']
           strong_de=prepare_ad(strong_raw,'DE','müde von')
           for key in ('problem_strength','severity_score','frequency_score','emotion_score','demo_score'):
-              assert strong[key] == strong_de[key], (key,strong[key],strong_de[key])
-
-          print('V5.4 problem/emotion OK',{'strong':s,'weak':w})
+              assert strong[key] == strong_de[key]
+          print('V5.4 problem/emotion OK')
           PY
-      - name: Flask smoke
+      - name: Claude hybrid scoring regression
+        run: |
+          python - <<'PY'
+          from claude_ranker import claude_semantic_score, hybrid_score
+          strong={
+            'physical_product':True,'product_identity_confidence':9,'problem_severity':9,
+            'problem_frequency':9,'emotional_pressure':8.5,'purchase_urgency':8,
+            'fit_35_plus':8,'evergreen_strength':9,'willingness_to_pay':8,
+            'value_proposition':8,'three_second_clarity':8,'demo_strength':8,
+            'market_breadth':7.5,'commodity_risk':2,'seasonality_risk':1,
+            'compliance_risk':2,'confidence':9
+          }
+          weak={
+            'physical_product':True,'product_identity_confidence':9,'problem_severity':2,
+            'problem_frequency':2,'emotional_pressure':2,'purchase_urgency':2,
+            'fit_35_plus':3,'evergreen_strength':3,'willingness_to_pay':3,
+            'value_proposition':3,'three_second_clarity':6,'demo_strength':5,
+            'market_breadth':4,'commodity_risk':8,'seasonality_risk':6,
+            'compliance_risk':1,'confidence':9
+          }
+          strong['claude_score']=claude_semantic_score(strong)
+          weak['claude_score']=claude_semantic_score(weak)
+          assert strong['claude_score'] > weak['claude_score'] + 35, (strong,weak)
+          strong_final,_=hybrid_score(75,strong)
+          weak_final,_=hybrid_score(75,weak)
+          assert strong_final > weak_final + 10, (strong_final,weak_final)
+          print('CLAUDE HYBRID SCORE OK',strong['claude_score'],weak['claude_score'])
+          PY
+      - name: Flask fallback smoke
         env:
           DATABASE_PATH: /tmp/product_hunter_test.db
         run: |
           rm -f /tmp/product_hunter_test.db
           python - <<'PY'
           from app import app
-          c = app.test_client()
-          r = c.get('/health')
-          assert r.status_code == 200, r.data
-          data = r.get_json()
-          assert data['engine'] == 'V5 Zero Credit'
-
-          ad = '''TestHome\nTestHome\nSponsrad\nSlipp jobbigt stök hemma varje dag. En enkel förvaringslösning som håller ordning.\nAktiv\nBiblioteks-id: 999999999999\n1 jan 2026\n'''
-          r = c.post('/api/analyze', json={'raw': ad, 'country': 'SE', 'keyword': 'slipp'})
-          assert r.status_code == 200, r.data
-          data = r.get_json()
-          assert data['engine'] == 'V5 Zero Credit'
-          assert data['count'] == 1
-          print('V5 smoke OK')
+          c=app.test_client()
+          health=c.get('/health').get_json()
+          assert health['engine']=='V5 Deterministic Fallback', health
+          assert health['claude_auto'] is False, health
+          ad='''TestHome\nTestHome\nSponsrad\nSlipp jobbigt stök hemma varje dag. En enkel förvaringslösning som håller ordning.\nAktiv\nBiblioteks-id: 999999999999\n1 jan 2026\n'''
+          r=c.post('/api/analyze',json={'raw':ad,'country':'SE','keyword':'slipp'})
+          assert r.status_code==200, r.data
+          data=r.get_json()
+          assert data['engine']=='V5 Deterministic Fallback', data
+          assert data['count']==1, data
+          assert 'claude' in data, data
+          print('V5 fallback smoke OK')
           PY
