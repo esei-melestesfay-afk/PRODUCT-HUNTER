@@ -8,6 +8,8 @@ on:
       - 'app.py'
       - 'database.py'
       - 'v5_engine.py'
+      - 'claude_ranker.py'
+      - 'hybrid_view.py'
       - 'analyzer.py'
       - '.github/workflows/v5-stress.yml'
 
@@ -22,38 +24,30 @@ jobs:
           python-version: '3.12'
       - name: Install
         run: pip install -r requirements.txt
-      - name: Run 1000-ad zero-credit stress test
+      - name: Run 1000-ad fallback stress test
         env:
           DATABASE_PATH: /tmp/product_hunter_stress.db
         run: |
+          rm -f /tmp/product_hunter_stress.db
           python - <<'PY'
-          import os
-          import time
+          import os,time
           from app import app
-
-          assert not os.environ.get('ANTHROPIC_API_KEY'), 'Stress test must be zero-credit'
-          c=app.test_client()
-          total=1000
-          batch=50
-          chunks=[]
+          assert not os.environ.get('ANTHROPIC_API_KEY')
+          c=app.test_client(); total=1000; batch=50; chunks=[]
           product_lines=[
-              ('Ryggstöd', 'Slipp stel rygg och obehag varje dag. Bekväm ergonomisk lösning för hem och bil.'),
-              ('Rengöringsborste', 'Spara tid vid städning. Elektrisk borste rengör badrum och fogar enklare.'),
-              ('Förvaringslösning', 'Slipp stök hemma varje dag. Håller ordning och gör vardagen enklare.'),
-              ('Sömnkudde', 'Vaknar du stel? Bekväm kudde för bättre sömn och stöd för nacke.'),
-              ('Bilorganizer', 'Slipp röra i bilen. Smart förvaring håller saker på plats varje dag.'),
+              ('Ryggstöd','Slipp stel rygg och obehag varje dag. Bekväm ergonomisk lösning för hem och bil.'),
+              ('Rengöringsborste','Spara tid vid städning. Elektrisk borste rengör badrum och fogar enklare.'),
+              ('Förvaringslösning','Slipp stök hemma varje dag. Håller ordning och gör vardagen enklare.'),
+              ('Sömnkudde','Vaknar du stel? Bekväm kudde för bättre sömn och stöd för nacke.'),
+              ('Bilorganizer','Slipp röra i bilen. Smart förvaring håller saker på plats varje dag.'),
           ]
           for start in range(0,total,batch):
               ads=[]
               for i in range(start,min(start+batch,total)):
-                  name,copy=product_lines[i % len(product_lines)]
-                  company=f'Brand{i % 83:02d}'
-                  day=(i % 27)+1
-                  month=['jan','feb','mar','apr','maj','jun'][i % 6]
-                  ad=f'''Company: {company}\nProduct: {name}\n{company}\nSponsrad\n{copy}\nAktiv\nBiblioteks-id: {88000000000000000+i}\n{day} {month} 2026\n'''
-                  ads.append(ad)
+                  name,copy=product_lines[i%len(product_lines)]
+                  company=f'Brand{i%83:02d}'; day=(i%27)+1; month=['jan','feb','mar','apr','maj','jun'][i%6]
+                  ads.append(f'''Company: {company}\nProduct: {name}\n{company}\nSponsrad\n{copy}\nAktiv\nBiblioteks-id: {88000000000000000+i}\n{day} {month} 2026\n''')
               chunks.append('\n\n---\n\n'.join(ads))
-
           t0=time.time()
           r=c.post('/api/jobs',json={'country':'SE','keyword':'slipp','total_chunks':len(chunks)})
           assert r.status_code==201, r.data
@@ -61,13 +55,12 @@ jobs:
           for idx,raw in enumerate(chunks):
               r=c.post(f'/api/jobs/{job}/chunks',json={'chunk_index':idx,'raw':raw})
               assert r.status_code==200, (idx,r.data[:500])
-
-          top=c.get('/api/top').get_json()
-          elapsed=time.time()-t0
+          top=c.get('/api/top').get_json(); elapsed=time.time()-t0
           assert top['library_count']==1000, top
           assert top['cluster_count']>=5, top
-          assert 1 <= len(top['top5']) <= 5, top
+          assert 1<=len(top['top5'])<=5, top
           health=c.get('/health').get_json()
-          assert health['engine']=='V5 Zero Credit'
+          assert health['engine']=='V5 Deterministic Fallback', health
+          assert health['claude_auto'] is False, health
           print(f'1000 ADS OK in {elapsed:.2f}s | clusters={top["cluster_count"]} | top5={len(top["top5"])}')
           PY
